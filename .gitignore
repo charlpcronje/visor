@@ -1,0 +1,8 @@
+/target
+*.exe
+*.pdb
+*.db
+*.log
+*.pid
+visor-logs/
+Cargo.lock

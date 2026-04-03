@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Visor Dashboard</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922; --purple: #bc8cff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    background: var(--bg); color: var(--text);
+    line-height: 1.5; padding: 20px;
+  }
+  h1 { font-size: 1.5em; margin-bottom: 4px; }
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .header h1 span { color: var(--accent); }
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 12px; font-size: 0.85em;
+    background: rgba(63,185,80,0.15); color: var(--green);
+  }
+  .status-badge.offline { background: rgba(248,81,73,0.15); color: var(--red); }
+  .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .stats { display: flex; gap: 16px; margin-bottom: 20px; }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px 20px; flex: 1; min-width: 140px;
+  }
+  .stat-card .label { font-size: 0.8em; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-card .value { font-size: 1.8em; font-weight: 600; margin-top: 4px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab {
+    padding: 8px 16px; border-radius: 6px; cursor: pointer;
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-dim); font-size: 0.9em; transition: all 0.2s;
+  }
+  .tab:hover { color: var(--text); border-color: var(--text-dim); }
+  .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .actions { display: flex; gap: 8px; }
+  .btn {
+    padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font-size: 0.85em; transition: all 0.2s;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.danger:hover { background: var(--red); color: #fff; }
+  .btn.terminal-btn { border-color: var(--green); color: var(--green); }
+  .btn.terminal-btn:hover { background: var(--green); color: #fff; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border-radius: 8px; overflow: hidden; }
+  thead th {
+    text-align: left; padding: 10px 14px; font-size: 0.8em;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-dim); background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 0.9em; }
+  tbody tr:hover { background: rgba(88,166,255,0.05); }
+  .status-running { color: var(--green); }
+  .status-stopped { color: var(--text-dim); }
+  .status-dead { color: var(--red); }
+  .status-failed { color: var(--yellow); }
+  .mode-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.8em; background: rgba(88,166,255,0.15); color: var(--accent);
+  }
+  .mode-badge.capture { background: rgba(188,140,255,0.15); color: var(--purple); }
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--text-dim); }
+  .empty-state p { font-size: 1.1em; margin-bottom: 8px; }
+  .uptime { color: var(--text-dim); font-size: 0.85em; }
+  .refresh-info { font-size: 0.75em; color: var(--text-dim); }
+
+  /* Terminal overlay */
+  .terminal-overlay {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.85); z-index: 1000;
+    flex-direction: column;
+  }
+  .terminal-overlay.visible { display: flex; }
+  .terminal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  .terminal-header h2 { font-size: 1em; font-weight: 500; }
+  .terminal-header .term-info { font-size: 0.8em; color: var(--text-dim); }
+  .terminal-container { flex: 1; padding: 8px; background: #000; overflow: hidden; }
+
+  /* Panels hidden by default */
+  .panel { display: none; }
+  .panel.visible { display: block; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <h1><span>visor</span> dashboard</h1>
+    <div class="status-badge" id="daemon-status"><div class="dot"></div><span>checking...</span></div>
+  </div>
+  <div class="actions">
+    <button class="btn" onclick="refresh()">Refresh</button>
+    <button class="btn" onclick="cleanup()">Cleanup</button>
+    <button class="btn danger" onclick="stopAll()">Stop All</button>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat-card"><div class="label">Active Apps</div><div class="value" id="stat-apps">-</div></div>
+  <div class="stat-card"><div class="label">Agents</div><div class="value" id="stat-agents">-</div></div>
+  <div class="stat-card"><div class="label">Groups</div><div class="value" id="stat-groups">-</div></div>
+  <div class="stat-card"><div class="label">Database</div><div class="value" id="stat-db" style="font-size:0.7em;word-break:break-all;">-</div></div>
+</div>
+
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+  <div class="tabs">
+    <div class="tab active" data-tab="running" onclick="switchTab('running')">Running</div>
+    <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
+  </div>
+  <div class="refresh-info">Auto-refresh every 3s</div>
+</div>
+
+<div id="panel-running" class="panel visible">
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th><th>PID</th><th>Mode</th><th>Agent</th><th>Group</th>
+        <th>Started</th><th>Uptime</th><th>Command</th><th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="running-body">
+      <tr><td colspan="9" class="empty-state"><p>No apps running</p></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div id="panel-history" class="panel">
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th><th>PID</th><th>Status</th><th>Mode</th><th>Agent</th><th>Group</th>
+        <th>Started</th><th>Uptime</th><th>Command</th>
+      </tr>
+    </thead>
+    <tbody id="history-body">
+      <tr><td colspan="9" class="empty-state"><p>No history</p></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Terminal overlay -->
+<div class="terminal-overlay" id="terminal-overlay">
+  <div class="terminal-header">
+    <div>
+      <h2 id="term-title">Terminal</h2>
+      <span class="term-info" id="term-info"></span>
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="clearTerminal()">Clear</button>
+      <button class="btn danger" onclick="closeTerminal()">Close</button>
+    </div>
+  </div>
+  <div class="terminal-container" id="terminal-container"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>
+let currentTab = 'running';
+let allApps = [];
+let term = null;
+let fitAddon = null;
+let streamingAbort = null;
+let streamingInterval = null;
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab[data-tab="${tab}"]`).classList.add('active');
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('visible'));
+  document.getElementById('panel-' + tab).classList.add('visible');
+}
+
+function formatUptime(startedAt) {
+  const start = new Date(startedAt);
+  const now = new Date();
+  const diff = Math.floor((now - start) / 1000);
+  if (diff < 0) return '0s';
+  if (diff < 60) return diff + 's';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ' + (diff % 60) + 's';
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  if (h < 24) return h + 'h ' + m + 'm';
+  const d = Math.floor(h / 24);
+  return d + 'd ' + (h % 24) + 'h';
+}
+
+function formatTime(ts) {
+  try { return new Date(ts).toLocaleString(); } catch { return ts; }
+}
+
+async function fetchStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const data = await r.json();
+    if (data.Status) {
+      const s = data.Status;
+      document.getElementById('stat-apps').textContent = s.active_apps;
+      document.getElementById('stat-agents').textContent = s.active_agents;
+      document.getElementById('stat-groups').textContent = s.active_groups;
+      document.getElementById('stat-db').textContent = s.db_path;
+      const badge = document.getElementById('daemon-status');
+      badge.classList.remove('offline');
+      badge.innerHTML = '<div class="dot"></div><span>Daemon Online</span>';
+    }
+  } catch {
+    const badge = document.getElementById('daemon-status');
+    badge.classList.add('offline');
+    badge.innerHTML = '<div class="dot"></div><span>Offline</span>';
+  }
+}
+
+async function fetchList() {
+  try {
+    const r = await fetch('/api/list');
+    const data = await r.json();
+    if (data.AppList) {
+      allApps = data.AppList.apps || [];
+      renderRunning(allApps);
+      renderHistory(allApps);
+    }
+  } catch {}
+}
+
+function renderRunning(apps) {
+  const running = apps.filter(a => a.status === 'running');
+  const tbody = document.getElementById('running-body');
+  if (running.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state"><p>No apps running</p></td></tr>';
+    return;
+  }
+  tbody.innerHTML = running.map(app => {
+    const args = JSON.parse(app.args_json || '[]');
+    const cmd = args.length ? app.cmd + ' ' + args.join(' ') : app.cmd;
+    const mode = app.io_mode || 'transparent';
+    const modeClass = mode === 'capture' ? 'capture' : '';
+    const hasLog = app.log_path && mode === 'capture';
+    const termBtn = hasLog
+      ? `<button class="btn terminal-btn" onclick="openTerminal('${esc(app.id)}','${esc(app.name)}','${esc(cmd)}')">Terminal</button>`
+      : '';
+    return `<tr>
+      <td><strong>${esc(app.name)}</strong></td>
+      <td>${app.pid}</td>
+      <td><span class="mode-badge ${modeClass}">${mode}</span></td>
+      <td>${esc(app.agent || '-')}</td>
+      <td>${esc(app.group_name || '-')}</td>
+      <td>${formatTime(app.started_at)}</td>
+      <td class="uptime">${formatUptime(app.started_at)}</td>
+      <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(cmd)}">${esc(cmd)}</td>
+      <td style="white-space:nowrap;">
+        ${termBtn}
+        <button class="btn danger" onclick="stopApp('${esc(app.name)}')">Stop</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function renderHistory(apps) {
+  const tbody = document.getElementById('history-body');
+  if (apps.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state"><p>No history</p></td></tr>';
+    return;
+  }
+  tbody.innerHTML = apps.map(app => {
+    const args = JSON.parse(app.args_json || '[]');
+    const cmd = args.length ? app.cmd + ' ' + args.join(' ') : app.cmd;
+    const statusClass = 'status-' + app.status;
+    const mode = app.io_mode || 'transparent';
+    const modeClass = mode === 'capture' ? 'capture' : '';
+    return `<tr>
+      <td><strong>${esc(app.name)}</strong></td>
+      <td>${app.pid}</td>
+      <td class="${statusClass}">${app.status}</td>
+      <td><span class="mode-badge ${modeClass}">${mode}</span></td>
+      <td>${esc(app.agent || '-')}</td>
+      <td>${esc(app.group_name || '-')}</td>
+      <td>${formatTime(app.started_at)}</td>
+      <td class="uptime">${formatUptime(app.started_at)}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(cmd)}">${esc(cmd)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// Terminal functions
+function openTerminal(appId, appName, cmd) {
+  const overlay = document.getElementById('terminal-overlay');
+  overlay.classList.add('visible');
+  document.getElementById('term-title').textContent = appName;
+  document.getElementById('term-info').textContent = `PID: ${appId} | ${cmd}`;
+
+  if (term) { term.dispose(); term = null; }
+
+  term = new Terminal({
+    theme: {
+      background: '#0d1117',
+      foreground: '#e6edf3',
+      cursor: '#58a6ff',
+      selectionBackground: '#264f78',
+    },
+    fontFamily: "'Cascadia Code', 'Consolas', monospace",
+    fontSize: 14,
+    scrollback: 10000,
+    convertEol: true,
+  });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(document.getElementById('terminal-container'));
+  fitAddon.fit();
+
+  term.writeln('\x1b[90m--- Attached to ' + appName + ' ---\x1b[0m');
+  term.writeln('');
+
+  // Start streaming log content
+  startStreaming(appId);
+
+  // Handle resize
+  window.addEventListener('resize', handleResize);
+}
+
+function handleResize() {
+  if (fitAddon) fitAddon.fit();
+}
+
+function startStreaming(appId) {
+  stopStreaming();
+  let offset = 0;
+
+  // Poll the log content endpoint
+  streamingInterval = setInterval(async () => {
+    try {
+      const r = await fetch(`/api/log-content/${appId}?offset=${offset}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.content && data.content.length > 0) {
+        term.write(data.content);
+        offset = data.new_offset;
+      }
+    } catch {}
+  }, 200);
+}
+
+function stopStreaming() {
+  if (streamingInterval) {
+    clearInterval(streamingInterval);
+    streamingInterval = null;
+  }
+}
+
+function closeTerminal() {
+  stopStreaming();
+  if (term) { term.dispose(); term = null; }
+  document.getElementById('terminal-overlay').classList.remove('visible');
+  window.removeEventListener('resize', handleResize);
+}
+
+function clearTerminal() {
+  if (term) term.clear();
+}
+
+async function stopApp(name) {
+  if (!confirm('Stop ' + name + '?')) return;
+  await fetch('/api/stop/' + encodeURIComponent(name), { method: 'POST' });
+  refresh();
+}
+
+async function stopAll() {
+  if (!confirm('Stop ALL tracked apps?')) return;
+  await fetch('/api/stop-all', { method: 'POST' });
+  refresh();
+}
+
+async function cleanup() {
+  await fetch('/api/cleanup', { method: 'POST' });
+  refresh();
+}
+
+function refresh() { fetchStatus(); fetchList(); }
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

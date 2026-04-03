@@ -1,0 +1,165 @@
+use anyhow::{Context, Result};
+use chrono::Utc;
+use rusqlite::{params, Connection};
+use std::path::Path;
+
+use crate::models::{AppRecord, AppStatus, IoMode};
+
+pub struct Registry {
+    conn: Connection,
+}
+
+impl Registry {
+    pub fn open(db_path: &str) -> Result<Self> {
+        if let Some(parent) = Path::new(db_path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let conn = Connection::open(db_path)
+            .with_context(|| format!("Failed to open database at {db_path}"))?;
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS apps (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                pid         INTEGER NOT NULL,
+                agent       TEXT,
+                group_name  TEXT,
+                cmd         TEXT NOT NULL,
+                args_json   TEXT NOT NULL,
+                cwd         TEXT,
+                started_at  TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                job_name    TEXT,
+                last_seen_at TEXT,
+                kill_code   TEXT,
+                io_mode     TEXT NOT NULL DEFAULT 'transparent',
+                log_path    TEXT
+            );",
+        )
+        .context("Failed to create apps table")?;
+
+        Ok(Self { conn })
+    }
+
+    pub fn insert_app(&self, app: &AppRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO apps (id, name, pid, agent, group_name, cmd, args_json, cwd, started_at, status, job_name, last_seen_at, kill_code, io_mode, log_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                app.id,
+                app.name,
+                app.pid,
+                app.agent,
+                app.group_name,
+                app.cmd,
+                app.args_json,
+                app.cwd,
+                app.started_at.to_rfc3339(),
+                app.status.to_string(),
+                app.job_name,
+                app.last_seen_at.map(|t| t.to_rfc3339()),
+                app.kill_code,
+                app.io_mode.to_string(),
+                app.log_path,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_status(&self, id: &str, status: &AppStatus) -> Result<()> {
+        self.conn.execute(
+            "UPDATE apps SET status = ?1, last_seen_at = ?2 WHERE id = ?3",
+            params![status.to_string(), Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_running(&self) -> Result<Vec<AppRecord>> {
+        self.list_by_status("running")
+    }
+
+    pub fn list_by_status(&self, status: &str) -> Result<Vec<AppRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, pid, agent, group_name, cmd, args_json, cwd, started_at, status, job_name, last_seen_at, kill_code, io_mode, log_path
+             FROM apps WHERE status = ?1"
+        )?;
+        let rows = stmt.query_map(params![status], |row| {
+            Ok(AppRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                pid: row.get::<_, i64>(2)? as u32,
+                agent: row.get(3)?,
+                group_name: row.get(4)?,
+                cmd: row.get(5)?,
+                args_json: row.get(6)?,
+                cwd: row.get(7)?,
+                started_at: chrono::DateTime::parse_from_rfc3339(
+                    &row.get::<_, String>(8)?
+                )
+                .unwrap_or_default()
+                .with_timezone(&chrono::Utc),
+                status: AppStatus::from_str(&row.get::<_, String>(9)?),
+                job_name: row.get(10)?,
+                last_seen_at: row.get::<_, Option<String>>(11)?
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc)),
+                kill_code: row.get(12)?,
+                io_mode: IoMode::from_str(&row.get::<_, String>(13).unwrap_or_else(|_| "transparent".to_string())),
+                log_path: row.get(14)?,
+            })
+        })?;
+
+        let mut apps = Vec::new();
+        for row in rows {
+            apps.push(row?);
+        }
+        Ok(apps)
+    }
+
+    pub fn find_by_name(&self, name: &str) -> Result<Option<AppRecord>> {
+        let apps = self.list_running()?;
+        Ok(apps.into_iter().find(|a| a.name == name))
+    }
+
+    pub fn find_by_id(&self, id: &str) -> Result<Option<AppRecord>> {
+        let apps = self.list_running()?;
+        Ok(apps.into_iter().find(|a| a.id == id))
+    }
+
+    pub fn find_by_pid(&self, pid: u32) -> Result<Option<AppRecord>> {
+        let apps = self.list_running()?;
+        Ok(apps.into_iter().find(|a| a.pid == pid))
+    }
+
+    pub fn find_by_agent(&self, agent: &str) -> Result<Vec<AppRecord>> {
+        let apps = self.list_running()?;
+        Ok(apps.into_iter().filter(|a| a.agent.as_deref() == Some(agent)).collect())
+    }
+
+    pub fn find_by_group(&self, group: &str) -> Result<Vec<AppRecord>> {
+        let apps = self.list_running()?;
+        Ok(apps
+            .into_iter()
+            .filter(|a| a.group_name.as_deref() == Some(group))
+            .collect())
+    }
+
+    pub fn count_distinct_agents(&self) -> Result<usize> {
+        let apps = self.list_running()?;
+        let agents: std::collections::HashSet<_> = apps
+            .iter()
+            .filter_map(|a| a.agent.as_deref())
+            .collect();
+        Ok(agents.len())
+    }
+
+    pub fn count_distinct_groups(&self) -> Result<usize> {
+        let apps = self.list_running()?;
+        let groups: std::collections::HashSet<_> = apps
+            .iter()
+            .filter_map(|a| a.group_name.as_deref())
+            .collect();
+        Ok(groups.len())
+    }
+}

@@ -1,0 +1,488 @@
+use anyhow::Result;
+use chrono::Utc;
+use std::path::Path;
+use uuid::Uuid;
+
+use crate::job::JobManager;
+use crate::models::{AppRecord, AppStatus, IoMode, Request, Response, DB_PATH, LOG_DIR, MASTER_KILL_CODE, PIPE_NAME};
+use crate::process;
+use crate::registry::Registry;
+
+pub struct Supervisor {
+    pub registry: Registry,
+    pub jobs: JobManager,
+}
+
+impl Supervisor {
+    pub fn new() -> Result<Self> {
+        let registry = Registry::open(DB_PATH)?;
+        let jobs = JobManager::new();
+        // Ensure log directory exists
+        let _ = std::fs::create_dir_all(LOG_DIR);
+        Ok(Self { registry, jobs })
+    }
+
+    pub fn reconcile(&self) -> Result<usize> {
+        let apps = self.registry.list_running()?;
+        let mut removed = 0;
+        for app in &apps {
+            if !process::is_process_alive(app.pid) {
+                self.registry.update_status(&app.id, &AppStatus::Dead)?;
+                if let Some(ref jn) = app.job_name {
+                    self.jobs.close_job(jn);
+                }
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    pub fn handle_request(&self, req: Request) -> Response {
+        match req {
+            Request::Start {
+                cmd,
+                args,
+                name,
+                agent,
+                group,
+                cwd,
+                kill_code,
+                io_mode,
+            } => self.handle_start(cmd, args, name, agent, group, cwd, kill_code, io_mode),
+            Request::Register {
+                id,
+                pid,
+                cmd,
+                args,
+                name,
+                agent,
+                group,
+                cwd,
+                kill_code,
+                io_mode,
+                job_name,
+            } => self.handle_register(id, pid, cmd, args, name, agent, group, cwd, kill_code, io_mode, job_name),
+            Request::List { agent, group, json } => self.handle_list(agent, group, json),
+            Request::Stop {
+                name,
+                id,
+                pid,
+                agent,
+                group,
+                code,
+            } => self.handle_stop(name, id, pid, agent, group, code),
+            Request::StopAll { code } => self.handle_stop_all(code),
+            Request::Cleanup => self.handle_cleanup(),
+            Request::Status => self.handle_status(),
+            Request::Shutdown => Response::Ok {
+                message: "Daemon shutting down".to_string(),
+            },
+            Request::Attach { name, id } => self.handle_attach(name, id),
+            Request::Logs { name, id } => self.handle_attach(name, id),
+        }
+    }
+
+    fn handle_start(
+        &self,
+        cmd: String,
+        args: Vec<String>,
+        name: String,
+        agent: Option<String>,
+        group: Option<String>,
+        cwd: Option<String>,
+        kill_code: Option<String>,
+        io_mode: IoMode,
+    ) -> Response {
+        if let Some(ref code) = kill_code {
+            if code.len() != 4 || !code.chars().all(|c| c.is_ascii_digit()) {
+                return Response::Error {
+                    message: "Kill code must be exactly 4 digits".to_string(),
+                };
+            }
+        }
+
+        match self.registry.find_by_name(&name) {
+            Ok(Some(_)) => {
+                return Response::Error {
+                    message: format!("An app named '{name}' is already running. Use a different name or stop it first."),
+                };
+            }
+            Err(e) => {
+                return Response::Error {
+                    message: format!("Registry error: {e}"),
+                };
+            }
+            _ => {}
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let job_name = id.clone();
+
+        if let Err(e) = self.jobs.create_job(&job_name) {
+            return Response::Error {
+                message: format!("Failed to create job object: {e}"),
+            };
+        }
+
+        // Determine log path for capture mode
+        let log_path = match io_mode {
+            IoMode::Capture => Some(format!("{}\\{}.log", LOG_DIR, &id)),
+            IoMode::Transparent => None,
+        };
+
+        let effective_cwd = cwd.as_deref();
+        let (child, proc_handle) = match io_mode {
+            IoMode::Capture => {
+                let lp = log_path.as_ref().unwrap();
+                match process::launch_suspended_captured(&cmd, &args, effective_cwd, Path::new(lp)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.jobs.close_job(&job_name);
+                        return Response::Error {
+                            message: format!("Failed to launch process: {e}"),
+                        };
+                    }
+                }
+            }
+            IoMode::Transparent => {
+                // Daemon-side transparent doesn't make sense (daemon has no terminal).
+                // Fall back to null stdio (the real transparent path goes through Register).
+                match process::launch_suspended(&cmd, &args, effective_cwd) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.jobs.close_job(&job_name);
+                        return Response::Error {
+                            message: format!("Failed to launch process: {e}"),
+                        };
+                    }
+                }
+            }
+        };
+
+        let pid = child.id();
+
+        if let Err(e) = self.jobs.assign_process(&job_name, proc_handle) {
+            let _ = process::terminate_process(pid);
+            self.jobs.close_job(&job_name);
+            return Response::Error {
+                message: format!("Failed to assign process to job: {e}"),
+            };
+        }
+
+        if let Err(e) = process::resume_process(pid) {
+            self.jobs.terminate_job(&job_name).ok();
+            return Response::Error {
+                message: format!("Failed to resume process: {e}"),
+            };
+        }
+
+        let record = AppRecord {
+            id: id.clone(),
+            name: name.clone(),
+            pid,
+            agent,
+            group_name: group,
+            cmd,
+            args_json: serde_json::to_string(&args).unwrap_or_default(),
+            cwd,
+            started_at: Utc::now(),
+            status: AppStatus::Running,
+            job_name: Some(job_name),
+            last_seen_at: Some(Utc::now()),
+            kill_code,
+            io_mode,
+            log_path,
+        };
+
+        if let Err(e) = self.registry.insert_app(&record) {
+            return Response::Error {
+                message: format!("Failed to persist record: {e}"),
+            };
+        }
+
+        Response::Started { id, name, pid }
+    }
+
+    fn handle_register(
+        &self,
+        id: String,
+        pid: u32,
+        cmd: String,
+        args: Vec<String>,
+        name: String,
+        agent: Option<String>,
+        group: Option<String>,
+        cwd: Option<String>,
+        kill_code: Option<String>,
+        io_mode: IoMode,
+        job_name: String,
+    ) -> Response {
+        if let Some(ref code) = kill_code {
+            if code.len() != 4 || !code.chars().all(|c| c.is_ascii_digit()) {
+                return Response::Error {
+                    message: "Kill code must be exactly 4 digits".to_string(),
+                };
+            }
+        }
+
+        match self.registry.find_by_name(&name) {
+            Ok(Some(_)) => {
+                return Response::Error {
+                    message: format!("An app named '{name}' is already running."),
+                };
+            }
+            Err(e) => {
+                return Response::Error {
+                    message: format!("Registry error: {e}"),
+                };
+            }
+            _ => {}
+        }
+
+        let record = AppRecord {
+            id: id.clone(),
+            name: name.clone(),
+            pid,
+            agent,
+            group_name: group,
+            cmd,
+            args_json: serde_json::to_string(&args).unwrap_or_default(),
+            cwd,
+            started_at: Utc::now(),
+            status: AppStatus::Running,
+            job_name: Some(job_name),
+            last_seen_at: Some(Utc::now()),
+            kill_code,
+            io_mode,
+            log_path: None,
+        };
+
+        if let Err(e) = self.registry.insert_app(&record) {
+            return Response::Error {
+                message: format!("Failed to persist record: {e}"),
+            };
+        }
+
+        Response::Started { id, name, pid }
+    }
+
+    fn handle_list(
+        &self,
+        agent: Option<String>,
+        group: Option<String>,
+        _json: bool,
+    ) -> Response {
+        let _ = self.reconcile();
+
+        let apps = if let Some(ref a) = agent {
+            self.registry.find_by_agent(a)
+        } else if let Some(ref g) = group {
+            self.registry.find_by_group(g)
+        } else {
+            self.registry.list_running()
+        };
+
+        match apps {
+            Ok(apps) => Response::AppList { apps },
+            Err(e) => Response::Error {
+                message: format!("Failed to list apps: {e}"),
+            },
+        }
+    }
+
+    fn handle_stop(
+        &self,
+        name: Option<String>,
+        id: Option<String>,
+        pid: Option<u32>,
+        agent: Option<String>,
+        group: Option<String>,
+        code: Option<String>,
+    ) -> Response {
+        let _ = self.reconcile();
+
+        let targets: Vec<AppRecord> = if let Some(ref n) = name {
+            match self.registry.find_by_name(n) {
+                Ok(Some(app)) => vec![app],
+                Ok(None) => {
+                    return Response::Error {
+                        message: format!("No running app named '{n}'"),
+                    }
+                }
+                Err(e) => {
+                    return Response::Error {
+                        message: e.to_string(),
+                    }
+                }
+            }
+        } else if let Some(ref i) = id {
+            match self.registry.find_by_id(i) {
+                Ok(Some(app)) => vec![app],
+                Ok(None) => {
+                    return Response::Error {
+                        message: format!("No running app with id '{i}'"),
+                    }
+                }
+                Err(e) => {
+                    return Response::Error {
+                        message: e.to_string(),
+                    }
+                }
+            }
+        } else if let Some(p) = pid {
+            match self.registry.find_by_pid(p) {
+                Ok(Some(app)) => vec![app],
+                Ok(None) => {
+                    return Response::Error {
+                        message: format!("No visor-tracked app with PID {p}"),
+                    }
+                }
+                Err(e) => {
+                    return Response::Error {
+                        message: e.to_string(),
+                    }
+                }
+            }
+        } else if let Some(ref a) = agent {
+            self.registry.find_by_agent(a).unwrap_or_default()
+        } else if let Some(ref g) = group {
+            self.registry.find_by_group(g).unwrap_or_default()
+        } else {
+            return Response::Error {
+                message: "No target specified for stop".to_string(),
+            };
+        };
+
+        let is_master = code.as_deref() == Some(MASTER_KILL_CODE);
+        let mut stopped_names = Vec::new();
+        let mut rejected_names = Vec::new();
+
+        for app in &targets {
+            if let Some(ref app_code) = app.kill_code {
+                if !is_master && code.as_deref() != Some(app_code.as_str()) {
+                    rejected_names.push(app.name.clone());
+                    continue;
+                }
+            }
+            self.stop_app(app);
+            stopped_names.push(app.name.clone());
+        }
+
+        if !rejected_names.is_empty() {
+            return Response::Error {
+                message: format!(
+                    "Kill code required or incorrect for: {}. Stopped: {}",
+                    rejected_names.join(", "),
+                    if stopped_names.is_empty() { "none".to_string() } else { stopped_names.join(", ") }
+                ),
+            };
+        }
+
+        Response::Stopped {
+            count: stopped_names.len(),
+            names: stopped_names,
+        }
+    }
+
+    fn handle_stop_all(&self, code: Option<String>) -> Response {
+        let _ = self.reconcile();
+        let apps = self.registry.list_running().unwrap_or_default();
+        let is_master = code.as_deref() == Some(MASTER_KILL_CODE);
+        let mut stopped_names = Vec::new();
+        let mut rejected_names = Vec::new();
+
+        for app in &apps {
+            if let Some(ref app_code) = app.kill_code {
+                if !is_master && code.as_deref() != Some(app_code.as_str()) {
+                    rejected_names.push(app.name.clone());
+                    continue;
+                }
+            }
+            self.stop_app(app);
+            stopped_names.push(app.name.clone());
+        }
+
+        if !rejected_names.is_empty() {
+            return Response::Error {
+                message: format!(
+                    "Kill code required for protected apps: {}. Stopped: {}",
+                    rejected_names.join(", "),
+                    if stopped_names.is_empty() { "none".to_string() } else { stopped_names.join(", ") }
+                ),
+            };
+        }
+
+        Response::Stopped {
+            count: stopped_names.len(),
+            names: stopped_names,
+        }
+    }
+
+    fn handle_cleanup(&self) -> Response {
+        match self.reconcile() {
+            Ok(removed) => Response::Cleaned { removed },
+            Err(e) => Response::Error {
+                message: format!("Cleanup failed: {e}"),
+            },
+        }
+    }
+
+    fn handle_status(&self) -> Response {
+        let _ = self.reconcile();
+        let active = self.registry.list_running().map(|a| a.len()).unwrap_or(0);
+        let agents = self.registry.count_distinct_agents().unwrap_or(0);
+        let groups = self.registry.count_distinct_groups().unwrap_or(0);
+
+        Response::Status {
+            daemon_running: true,
+            active_apps: active,
+            active_agents: agents,
+            active_groups: groups,
+            db_path: DB_PATH.to_string(),
+            pipe_name: PIPE_NAME.to_string(),
+        }
+    }
+
+    fn handle_attach(&self, name: Option<String>, id: Option<String>) -> Response {
+        let _ = self.reconcile();
+
+        let app = if let Some(ref n) = name {
+            self.registry.find_by_name(n).ok().flatten()
+        } else if let Some(ref i) = id {
+            self.registry.find_by_id(i).ok().flatten()
+        } else {
+            None
+        };
+
+        match app {
+            Some(app) => {
+                if app.io_mode == IoMode::Transparent {
+                    return Response::Error {
+                        message: format!("'{}' is running in transparent mode — output is in the original terminal, not captured.", app.name),
+                    };
+                }
+                match app.log_path {
+                    Some(ref lp) => Response::AttachInfo {
+                        log_path: lp.clone(),
+                        name: app.name,
+                    },
+                    None => Response::Error {
+                        message: format!("No log file for '{}'", app.name),
+                    },
+                }
+            }
+            None => Response::Error {
+                message: "App not found".to_string(),
+            },
+        }
+    }
+
+    fn stop_app(&self, app: &AppRecord) {
+        if let Some(ref jn) = app.job_name {
+            let _ = self.jobs.terminate_job(jn);
+        } else {
+            let _ = process::terminate_process(app.pid);
+        }
+        let _ = self.registry.update_status(&app.id, &AppStatus::Stopped);
+    }
+}

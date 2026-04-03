@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(./target/release/visor.exe help:*)",
+      "Bash(./target/release/visor.exe version:*)",
+      "Bash(./target/release/visor.exe start:*)",
+      "Bash(./target/release/visor.exe attach:*)",
+      "Bash(./target/release/visor.exe)",
+      "Bash(./target/release/visor.exe --help)",
+      "Bash(./target/release/visor.exe --version)",
+      "Bash(./target/release/visor.exe list:*)",
+      "Bash(./target/release/visor.exe stop:*)",
+      "Bash(./target/release/visor.exe stop-all:*)",
+      "Bash(./target/release/visor.exe gui:*)",
+      "Bash(./target/release/visor.exe logs:*)",
+      "Bash(./target/release/visor.exe cleanup:*)",
+      "Bash(./target/release/visor.exe daemon:*)",
+      "Bash(./target/release/visor.exe status:*)",
+      "Read(//c/dev/scripts/**)",
+      "Bash(taskkill /F /IM visor.exe)",
+      "Bash(rm -f \"c:/dev/scripts/visor.pid\" \"c:/dev/scripts/visor.db\" \"c:/dev/scripts/visor.log\")",
+      "Bash(cmd.exe /c \"taskkill /F /IM visor.exe\")",
+      "Bash(powershell -Command \"Get-Process visor -ErrorAction SilentlyContinue | Stop-Process -Force\")"
+    ]
+  }
+}
