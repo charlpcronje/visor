@@ -18,6 +18,8 @@ pub struct AppRecord {
     pub kill_code: Option<String>,
     pub io_mode: IoMode,
     pub log_path: Option<String>,
+    pub restart: bool,
+    pub watch_exe: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +93,8 @@ pub enum Request {
         cwd: Option<String>,
         kill_code: Option<String>,
         io_mode: IoMode,
+        restart: bool,
+        watch_exe: Option<String>,
     },
     /// CLI-spawned register (transparent mode) — CLI already started the process
     Register {
@@ -130,6 +134,10 @@ pub enum Request {
         name: Option<String>,
         id: Option<String>,
     },
+    /// Scan directory for projects
+    Scan {
+        path: String,
+    },
     /// Get log path for a process
     Logs {
         name: Option<String>,
@@ -165,6 +173,9 @@ pub enum Response {
     AttachInfo {
         log_path: String,
         name: String,
+    },
+    ScanResult {
+        projects: Vec<crate::scanner::Project>,
     },
     Ok {
         message: String,

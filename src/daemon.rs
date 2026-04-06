@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use crate::ipc::PipeServer;
 use crate::models::{Request, Response, MUTEX_NAME, PID_PATH, LOG_PATH};
@@ -7,31 +10,32 @@ use crate::supervisor::Supervisor;
 
 /// Run the daemon main loop.
 pub fn run() -> Result<()> {
-    // Try to acquire singleton mutex
     let _mutex = acquire_singleton_mutex()?;
 
-    // Write PID file
     let pid = std::process::id();
     let _ = fs::write(PID_PATH, pid.to_string());
-
-    // Initialize log file
     let _ = fs::write(LOG_PATH, format!("visor daemon started, pid={pid}\n"));
 
-    let supervisor = Supervisor::new()?;
+    let supervisor = Arc::new(Supervisor::new()?);
 
-    // Initial reconciliation
     let removed = supervisor.reconcile()?;
     log(&format!("Initial reconciliation: removed {removed} stale entries"));
 
+    // Background thread: restart dead apps, watch exe files
+    let bg_supervisor = Arc::clone(&supervisor);
+    std::thread::spawn(move || {
+        background_loop(bg_supervisor);
+    });
+
     log("Daemon ready, listening for commands...");
 
-    // Main loop: create pipe, accept client, handle request, repeat
+    // Main loop: pipe server
     loop {
         let server = match PipeServer::create() {
             Ok(s) => s,
             Err(e) => {
                 log(&format!("Failed to create pipe: {e}"));
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
         };
@@ -77,9 +81,87 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // Cleanup
     let _ = fs::remove_file(PID_PATH);
     Ok(())
+}
+
+/// Background loop: checks every 2 seconds for dead apps to restart and exe file changes.
+fn background_loop(supervisor: Arc<Supervisor>) {
+    let mut exe_timestamps: HashMap<String, SystemTime> = HashMap::new();
+
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+
+        // 1. Auto-restart dead apps with restart=true
+        let restarted = supervisor.reconcile_and_restart();
+        for id in &restarted {
+            log(&format!("Auto-restarted app {id}"));
+        }
+
+        // 2. Watch exe files for changes
+        let apps = supervisor.registry.list_running().unwrap_or_default();
+        for app in &apps {
+            if let Some(ref exe_path) = app.watch_exe {
+                match fs::metadata(exe_path) {
+                    Ok(meta) => {
+                        if let Ok(modified) = meta.modified() {
+                            let prev = exe_timestamps.get(&app.id).copied();
+                            exe_timestamps.insert(app.id.clone(), modified);
+
+                            if let Some(prev_time) = prev {
+                                if modified > prev_time {
+                                    log(&format!(
+                                        "Exe changed for '{}' ({}), restarting...",
+                                        app.name, exe_path
+                                    ));
+                                    // Stop the app
+                                    supervisor.stop_app_public(app);
+                                    // Wait for the file to stabilize
+                                    wait_for_file_stable(exe_path);
+                                    // Restart
+                                    if let Err(e) = supervisor.restart_app(app) {
+                                        log(&format!("Failed to restart '{}': {e}", app.name));
+                                    } else {
+                                        log(&format!("Restarted '{}' after exe change", app.name));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // File temporarily gone (being overwritten) — skip this tick
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Wait for a file to stop changing (stable for 500ms).
+fn wait_for_file_stable(path: &str) {
+    let mut last_size = 0u64;
+    let mut stable_count = 0;
+
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(250));
+        match fs::metadata(path) {
+            Ok(meta) => {
+                let size = meta.len();
+                if size == last_size && size > 0 {
+                    stable_count += 1;
+                    if stable_count >= 2 {
+                        return; // File stable for 500ms
+                    }
+                } else {
+                    stable_count = 0;
+                    last_size = size;
+                }
+            }
+            Err(_) => {
+                stable_count = 0;
+            }
+        }
+    }
 }
 
 fn log(msg: &str) {
@@ -120,7 +202,6 @@ fn acquire_singleton_mutex() -> Result<MutexGuard> {
             .context("CreateMutexA failed")?;
 
         let last_error = GetLastError();
-        // ERROR_ALREADY_EXISTS = 183
         if last_error.0 == 183 {
             let _ = windows::Win32::Foundation::CloseHandle(handle);
             anyhow::bail!("Another visor daemon is already running");

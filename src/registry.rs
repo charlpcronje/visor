@@ -2,11 +2,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::models::{AppRecord, AppStatus, IoMode};
 
 pub struct Registry {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl Registry {
@@ -15,10 +16,10 @@ impl Registry {
             std::fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(db_path)
+        let conn_inner = Connection::open(db_path)
             .with_context(|| format!("Failed to open database at {db_path}"))?;
 
-        conn.execute_batch(
+        conn_inner.execute_batch(
             "CREATE TABLE IF NOT EXISTS apps (
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
@@ -34,18 +35,20 @@ impl Registry {
                 last_seen_at TEXT,
                 kill_code   TEXT,
                 io_mode     TEXT NOT NULL DEFAULT 'transparent',
-                log_path    TEXT
+                log_path    TEXT,
+                restart     INTEGER NOT NULL DEFAULT 0,
+                watch_exe   TEXT
             );",
         )
         .context("Failed to create apps table")?;
 
-        Ok(Self { conn })
+        Ok(Self { conn: Mutex::new(conn_inner) })
     }
 
     pub fn insert_app(&self, app: &AppRecord) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO apps (id, name, pid, agent, group_name, cmd, args_json, cwd, started_at, status, job_name, last_seen_at, kill_code, io_mode, log_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO apps (id, name, pid, agent, group_name, cmd, args_json, cwd, started_at, status, job_name, last_seen_at, kill_code, io_mode, log_path, restart, watch_exe)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 app.id,
                 app.name,
@@ -62,13 +65,23 @@ impl Registry {
                 app.kill_code,
                 app.io_mode.to_string(),
                 app.log_path,
+                app.restart as i32,
+                app.watch_exe,
             ],
         )?;
         Ok(())
     }
 
+    pub fn update_pid_and_status(&self, id: &str, pid: u32, status: &AppStatus, job_name: Option<&str>) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE apps SET pid = ?1, status = ?2, last_seen_at = ?3, job_name = ?4 WHERE id = ?5",
+            params![pid as i64, status.to_string(), Utc::now().to_rfc3339(), job_name, id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_status(&self, id: &str, status: &AppStatus) -> Result<()> {
-        self.conn.execute(
+        self.conn.lock().unwrap().execute(
             "UPDATE apps SET status = ?1, last_seen_at = ?2 WHERE id = ?3",
             params![status.to_string(), Utc::now().to_rfc3339(), id],
         )?;
@@ -80,8 +93,9 @@ impl Registry {
     }
 
     pub fn list_by_status(&self, status: &str) -> Result<Vec<AppRecord>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, name, pid, agent, group_name, cmd, args_json, cwd, started_at, status, job_name, last_seen_at, kill_code, io_mode, log_path
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, pid, agent, group_name, cmd, args_json, cwd, started_at, status, job_name, last_seen_at, kill_code, io_mode, log_path, restart, watch_exe
              FROM apps WHERE status = ?1"
         )?;
         let rows = stmt.query_map(params![status], |row| {
@@ -107,6 +121,8 @@ impl Registry {
                 kill_code: row.get(12)?,
                 io_mode: IoMode::from_str(&row.get::<_, String>(13).unwrap_or_else(|_| "transparent".to_string())),
                 log_path: row.get(14)?,
+                restart: row.get::<_, i32>(15).unwrap_or(0) != 0,
+                watch_exe: row.get(16)?,
             })
         })?;
 

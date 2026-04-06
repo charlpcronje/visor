@@ -89,28 +89,6 @@ pub fn launch_suspended_captured(
     Ok((child, handle))
 }
 
-/// Launch a process transparently with inherited stdio (for CLI-side transparent mode).
-/// NOT suspended — runs immediately with the user's terminal.
-pub fn launch_transparent(
-    cmd: &str,
-    args: &[String],
-    cwd: Option<&str>,
-) -> Result<std::process::Child> {
-    let mut command = Command::new(cmd);
-    command
-        .args(args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
-    }
-
-    let child = command.spawn().with_context(|| format!("Failed to spawn '{cmd}'"))?;
-    Ok(child)
-}
-
 /// Resume a suspended process by its main thread.
 pub fn resume_process(pid: u32) -> Result<()> {
     use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
@@ -178,14 +156,3 @@ pub fn terminate_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
-/// Open a process handle suitable for job assignment.
-pub fn open_process_handle(pid: u32) -> Result<HANDLE> {
-    unsafe {
-        OpenProcess(
-            PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION | PROCESS_TERMINATE,
-            false,
-            pid,
-        )
-        .context("OpenProcess failed")
-    }
-}

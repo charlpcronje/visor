@@ -7,6 +7,7 @@ use crate::job::JobManager;
 use crate::models::{AppRecord, AppStatus, IoMode, Request, Response, DB_PATH, LOG_DIR, MASTER_KILL_CODE, PIPE_NAME};
 use crate::process;
 use crate::registry::Registry;
+use crate::scanner;
 
 pub struct Supervisor {
     pub registry: Registry,
@@ -48,7 +49,9 @@ impl Supervisor {
                 cwd,
                 kill_code,
                 io_mode,
-            } => self.handle_start(cmd, args, name, agent, group, cwd, kill_code, io_mode),
+                restart,
+                watch_exe,
+            } => self.handle_start(cmd, args, name, agent, group, cwd, kill_code, io_mode, restart, watch_exe),
             Request::Register {
                 id,
                 pid,
@@ -79,6 +82,7 @@ impl Supervisor {
             },
             Request::Attach { name, id } => self.handle_attach(name, id),
             Request::Logs { name, id } => self.handle_attach(name, id),
+            Request::Scan { path } => self.handle_scan(path),
         }
     }
 
@@ -92,6 +96,8 @@ impl Supervisor {
         cwd: Option<String>,
         kill_code: Option<String>,
         io_mode: IoMode,
+        restart: bool,
+        watch_exe: Option<String>,
     ) -> Response {
         if let Some(ref code) = kill_code {
             if code.len() != 4 || !code.chars().all(|c| c.is_ascii_digit()) {
@@ -192,12 +198,19 @@ impl Supervisor {
             kill_code,
             io_mode,
             log_path,
+            restart,
+            watch_exe: watch_exe.clone(),
         };
 
         if let Err(e) = self.registry.insert_app(&record) {
             return Response::Error {
                 message: format!("Failed to persist record: {e}"),
             };
+        }
+
+        // Start file watcher if watch_exe is set
+        if let Some(ref exe_path) = watch_exe {
+            self.start_exe_watcher(&id, exe_path);
         }
 
         Response::Started { id, name, pid }
@@ -255,6 +268,8 @@ impl Supervisor {
             kill_code,
             io_mode,
             log_path: None,
+            restart: false,
+            watch_exe: None,
         };
 
         if let Err(e) = self.registry.insert_app(&record) {
@@ -475,6 +490,80 @@ impl Supervisor {
                 message: "App not found".to_string(),
             },
         }
+    }
+
+    fn handle_scan(&self, path: String) -> Response {
+        let projects = scanner::scan(&path);
+        Response::ScanResult { projects }
+    }
+
+    /// Reconcile and auto-restart apps that have restart=true.
+    /// Returns list of app IDs that were restarted.
+    pub fn reconcile_and_restart(&self) -> Vec<String> {
+        let apps = self.registry.list_running().unwrap_or_default();
+        let mut restarted = Vec::new();
+
+        for app in &apps {
+            if !process::is_process_alive(app.pid) {
+                if let Some(ref jn) = app.job_name {
+                    self.jobs.close_job(jn);
+                }
+
+                if app.restart {
+                    // Relaunch the process with the same command
+                    if let Ok(()) = self.restart_app(app) {
+                        restarted.push(app.id.clone());
+                        continue;
+                    }
+                }
+
+                let _ = self.registry.update_status(&app.id, &AppStatus::Dead);
+            }
+        }
+
+        restarted
+    }
+
+    pub fn restart_app(&self, app: &AppRecord) -> Result<()> {
+        let args: Vec<String> = serde_json::from_str(&app.args_json).unwrap_or_default();
+        let job_name = app.id.clone();
+
+        // Create new job object
+        self.jobs.create_job(&job_name)?;
+
+        let log_path = app.log_path.clone();
+        let effective_cwd = app.cwd.as_deref();
+
+        let (child, proc_handle) = match app.io_mode {
+            IoMode::Capture => {
+                if let Some(ref lp) = log_path {
+                    process::launch_suspended_captured(&app.cmd, &args, effective_cwd, Path::new(lp))?
+                } else {
+                    process::launch_suspended(&app.cmd, &args, effective_cwd)?
+                }
+            }
+            IoMode::Transparent => {
+                process::launch_suspended(&app.cmd, &args, effective_cwd)?
+            }
+        };
+
+        let pid = child.id();
+        self.jobs.assign_process(&job_name, proc_handle)?;
+        process::resume_process(pid)?;
+
+        self.registry.update_pid_and_status(&app.id, pid, &AppStatus::Running, Some(&job_name))?;
+
+        Ok(())
+    }
+
+    /// Start a background thread that watches an exe file and restarts the app when it changes.
+    fn start_exe_watcher(&self, _app_id: &str, _exe_path: &str) {
+        // The daemon loop handles this via poll-based checking.
+        // See daemon.rs watch_exe_poll().
+    }
+
+    pub fn stop_app_public(&self, app: &AppRecord) {
+        self.stop_app(app);
     }
 
     fn stop_app(&self, app: &AppRecord) {

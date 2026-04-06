@@ -95,6 +95,28 @@
   /* Panels hidden by default */
   .panel { display: none; }
   .panel.visible { display: block; }
+  /* Serve bar */
+  .serve-bar {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 16px; margin-bottom: 20px;
+  }
+  .serve-bar label { font-size: 0.8em; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+  .serve-bar input {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); padding: 6px 10px; font-size: 0.9em; outline: none;
+  }
+  .serve-bar input:focus { border-color: var(--accent); }
+  .serve-bar input.path-input { flex: 1; min-width: 200px; }
+  .serve-bar input.port-input { width: 70px; text-align: center; }
+  .serve-btn {
+    padding: 6px 16px; border-radius: 6px; cursor: pointer; border: none;
+    font-size: 0.9em; font-weight: 500; transition: all 0.2s; display: flex; align-items: center; gap: 6px;
+  }
+  .serve-btn.start { background: var(--green); color: #fff; }
+  .serve-btn.start:hover { opacity: 0.85; }
+  .serve-btn.stop { background: var(--red); color: #fff; }
+  .serve-btn.stop:hover { opacity: 0.85; }
 </style>
 </head>
 <body>
@@ -118,10 +140,22 @@
   <div class="stat-card"><div class="label">Database</div><div class="value" id="stat-db" style="font-size:0.7em;word-break:break-all;">-</div></div>
 </div>
 
+<div class="serve-bar">
+  <label>Host</label>
+  <input type="text" class="path-input" id="serve-path" placeholder="Directory path...">
+  <label>Port</label>
+  <input type="text" class="port-input" id="serve-port" value="5000">
+  <button class="serve-btn start" id="serve-btn" onclick="toggleServe()">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21"/></svg>
+    Host
+  </button>
+</div>
+
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
   <div class="tabs">
     <div class="tab active" data-tab="running" onclick="switchTab('running')">Running</div>
     <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
+    <div class="tab" data-tab="projects" onclick="switchTab('projects')">Projects</div>
   </div>
   <div class="refresh-info">Auto-refresh every 3s</div>
 </div>
@@ -152,6 +186,14 @@
       <tr><td colspan="9" class="empty-state"><p>No history</p></td></tr>
     </tbody>
   </table>
+</div>
+
+<div id="panel-projects" class="panel">
+  <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+    <button class="btn" onclick="scanProjects()">Scan Projects</button>
+    <span id="scan-status" style="font-size:0.8em;color:var(--text-dim);"></span>
+  </div>
+  <div id="projects-list"></div>
 </div>
 
 <!-- Terminal overlay -->
@@ -399,8 +441,110 @@ function esc(s) {
   return d.innerHTML;
 }
 
+// Project scanner
+let scannedProjects = [];
+
+async function scanProjects() {
+  const path = document.getElementById('serve-path').value.trim() || '.';
+  document.getElementById('scan-status').textContent = 'Scanning...';
+  try {
+    const r = await fetch('/api/scan?path=' + encodeURIComponent(path));
+    scannedProjects = await r.json();
+    renderProjects(scannedProjects);
+    document.getElementById('scan-status').textContent = scannedProjects.length + ' project(s) found';
+  } catch(e) {
+    document.getElementById('scan-status').textContent = 'Scan failed';
+  }
+}
+
+function renderProjects(projects) {
+  const el = document.getElementById('projects-list');
+  if (projects.length === 0) {
+    el.innerHTML = '<div class="empty-state"><p>No projects found. Click Scan Projects.</p></div>';
+    return;
+  }
+
+  const kindIcons = { node: '📦', deno: '🦕', rust: '🦀', python: '🐍', go: '🐹', php: '🐘' };
+
+  el.innerHTML = projects.map(p => {
+    const icon = kindIcons[p.kind] || '📁';
+    const cmds = p.commands.map(c =>
+      `<button class="btn" style="margin:2px 4px 2px 0;" onclick='runProjectCmd(${JSON.stringify(JSON.stringify(c))})'>${esc(c.label)}</button>`
+    ).join('');
+    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin-bottom:10px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-size:1.3em;">${icon}</span>
+        <strong>${esc(p.name)}</strong>
+        <span style="color:var(--text-dim);font-size:0.8em;">${esc(p.kind)}</span>
+        <span style="color:var(--text-dim);font-size:0.75em;margin-left:auto;">${esc(p.path)}</span>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;">${cmds}</div>
+    </div>`;
+  }).join('');
+}
+
+async function runProjectCmd(cmdJson) {
+  const c = JSON.parse(cmdJson);
+  const name = c.label.replace(/[^a-zA-Z0-9-]/g, '-').substring(0, 30);
+  const body = JSON.stringify({ cmd: c.cmd, args: c.args, cwd: c.cwd, name });
+  const r = await fetch('/api/run-cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  const data = await r.json();
+  if (data.Error) { alert('Error: ' + data.Error.message); }
+  else { refresh(); switchTab('running'); }
+}
+
+// File server controls
+let serveRunning = false;
+let serveName = 'fileserver';
+
+async function toggleServe() {
+  if (serveRunning) {
+    await fetch('/api/stop/' + encodeURIComponent(serveName), { method: 'POST' });
+    serveRunning = false;
+    updateServeBtn();
+    refresh();
+  } else {
+    const path = document.getElementById('serve-path').value.trim();
+    const port = document.getElementById('serve-port').value.trim();
+    if (!path) { alert('Enter a directory path'); return; }
+    if (!port) { alert('Enter a port'); return; }
+    const r = await fetch('/api/serve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, port: parseInt(port), name: serveName })
+    });
+    const data = await r.json();
+    if (data.error) { alert('Error: ' + data.error); return; }
+    serveRunning = true;
+    updateServeBtn();
+    refresh();
+  }
+}
+
+function updateServeBtn() {
+  const btn = document.getElementById('serve-btn');
+  if (serveRunning) {
+    btn.className = 'serve-btn stop';
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg> Stop';
+  } else {
+    btn.className = 'serve-btn start';
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5,3 19,12 5,21"/></svg> Host';
+  }
+}
+
+function checkServeStatus() {
+  const wasRunning = serveRunning;
+  serveRunning = allApps.some(a => a.name === serveName && a.status === 'running');
+  if (wasRunning !== serveRunning) updateServeBtn();
+}
+
+// Populate path from server's launch dir
+fetch('/api/cwd').then(r => r.json()).then(data => {
+  if (data.cwd) document.getElementById('serve-path').value = data.cwd;
+}).catch(() => {});
+
 refresh();
-setInterval(refresh, 3000);
+setInterval(() => { refresh(); checkServeStatus(); }, 3000);
 </script>
 </body>
 </html>

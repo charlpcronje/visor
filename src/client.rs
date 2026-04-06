@@ -5,9 +5,7 @@ use std::process::Command;
 use uuid::Uuid;
 
 use crate::ipc::PipeClient;
-use crate::job::JobManager;
 use crate::models::{AppRecord, IoMode, Request, Response};
-use crate::process;
 
 const MAX_CONNECT_ATTEMPTS: u32 = 20;
 const CONNECT_RETRY_MS: u64 = 250;
@@ -54,51 +52,38 @@ pub fn run_transparent(
     let id = Uuid::new_v4().to_string();
     let job_name = id.clone();
 
-    // Create job object for safe containment
-    let job_mgr = JobManager::new();
-    job_mgr.create_job(&job_name)?;
+    // Register with daemon in a background thread so it doesn't delay the child
+    let reg_id = id.clone();
+    let reg_cmd = cmd.clone();
+    let reg_args = args.clone();
+    let reg_name = name.clone();
+    let reg_agent = agent.clone();
+    let reg_group = group.clone();
+    let reg_cwd = cwd.clone();
+    let reg_kill_code = kill_code.clone();
+    let reg_job_name = job_name.clone();
 
-    // Launch process with inherited stdio
-    let mut child = process::launch_transparent(&cmd, &args, cwd.as_deref())?;
-    let pid = child.id();
-
-    // Assign to job object
-    let proc_handle = process::open_process_handle(pid)?;
-    job_mgr.assign_process(&job_name, proc_handle)?;
-
-    // Register with daemon (auto-starts daemon if needed)
-    let resp = send_request(Request::Register {
-        id: id.clone(),
-        pid,
-        cmd,
-        args,
-        name: name.clone(),
-        agent,
-        group,
-        cwd,
-        kill_code,
-        io_mode: IoMode::Transparent,
-        job_name: job_name.clone(),
+    std::thread::spawn(move || {
+        let _ = send_request(Request::Register {
+            id: reg_id,
+            pid: 0, // will be updated below via a second message, or daemon reconciles
+            cmd: reg_cmd,
+            args: reg_args,
+            name: reg_name,
+            agent: reg_agent,
+            group: reg_group,
+            cwd: reg_cwd,
+            kill_code: reg_kill_code,
+            io_mode: IoMode::Transparent,
+            job_name: reg_job_name,
+        });
     });
 
-    match resp {
-        Ok(Response::Error { message }) => {
-            eprintln!("Warning: daemon registration failed: {message}");
-            // Continue anyway — the process is already running
-        }
-        Err(e) => {
-            eprintln!("Warning: could not contact daemon: {e}");
-        }
-        _ => {}
-    }
+    // Use ConPTY: the child gets a real pseudo-terminal, so libraries like
+    // rustyline, crossterm, etc. see a genuine TTY on all handles.
+    let exit_code = crate::pty::run_with_pty(&cmd, &args, cwd.as_deref())?;
 
-    // Wait for child to exit — this is the transparent behavior
-    let status = child.wait().context("Failed to wait on child process")?;
-
-    // Don't drop job_mgr before child exits (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE would kill it)
-    drop(job_mgr);
-
-    std::process::exit(status.code().unwrap_or(1));
+    std::process::exit(exit_code as i32);
 }
 
 /// Attach to a captured process's log output.
@@ -212,6 +197,9 @@ pub fn print_response(response: &Response, json_mode: bool) {
         }
         Response::AttachInfo { log_path, name } => {
             println!("Log for '{name}': {log_path}");
+        }
+        Response::ScanResult { projects } => {
+            println!("{}", serde_json::to_string_pretty(projects).unwrap_or_default());
         }
         Response::Ok { message } => {
             println!("{message}");

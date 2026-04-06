@@ -29,7 +29,7 @@ pub fn run(port: u16) -> Result<()> {
 
 fn serve_api(server: Arc<tiny_http::Server>) {
     loop {
-        let request = match server.recv() {
+        let mut request = match server.recv() {
             Ok(r) => r,
             Err(_) => break,
         };
@@ -49,6 +49,21 @@ fn serve_api(server: Arc<tiny_http::Server>) {
             ("POST", "/api/cleanup") => handle_api_cleanup(),
             ("GET", p) if p.starts_with("/api/log-content/") => {
                 handle_api_log_content(p)
+            }
+            ("GET", "/api/cwd") => handle_api_cwd(),
+            ("GET", p) if p.starts_with("/api/scan") => {
+                let path = p.split("path=").nth(1).unwrap_or(".");
+                handle_api_scan(&urlencoding_decode(path))
+            }
+            ("POST", p) if p.starts_with("/api/run-cmd") => {
+                let mut body_buf = String::new();
+                let _ = request.as_reader().read_to_string(&mut body_buf);
+                handle_api_run_cmd(&body_buf)
+            }
+            ("POST", "/api/serve") => {
+                let mut body_buf = String::new();
+                let _ = request.as_reader().read_to_string(&mut body_buf);
+                handle_api_serve(&body_buf)
             }
             _ => (404, "text/plain", "Not found".to_string()),
         };
@@ -107,6 +122,103 @@ fn handle_api_stop_all() -> (i32, &'static str, String) {
 
 fn handle_api_cleanup() -> (i32, &'static str, String) {
     match client::send_request(Request::Cleanup) {
+        Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn handle_api_scan(path: &str) -> (i32, &'static str, String) {
+    let projects = crate::scanner::scan(path);
+    let body = serde_json::to_string(&projects).unwrap_or_else(|_| "[]".to_string());
+    (200, "application/json", body)
+}
+
+fn handle_api_run_cmd(body: &str) -> (i32, &'static str, String) {
+    use crate::models::IoMode;
+
+    #[derive(serde::Deserialize)]
+    struct RunReq {
+        cmd: String,
+        args: Vec<String>,
+        cwd: String,
+        name: String,
+    }
+
+    let req: RunReq = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (400, "application/json", format!(r#"{{"error":"{}"}}"#, e));
+        }
+    };
+
+    match client::send_request(Request::Start {
+        cmd: req.cmd,
+        args: req.args,
+        name: req.name,
+        agent: None,
+        group: Some("project".to_string()),
+        cwd: Some(req.cwd),
+        kill_code: None,
+        io_mode: IoMode::Capture,
+        restart: false,
+        watch_exe: None,
+    }) {
+        Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn handle_api_cwd() -> (i32, &'static str, String) {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    let body = format!(r#"{{"cwd":{}}}"#, serde_json::to_string(&cwd).unwrap_or_default());
+    (200, "application/json", body)
+}
+
+fn handle_api_serve(body: &str) -> (i32, &'static str, String) {
+    use crate::models::IoMode;
+
+    #[derive(serde::Deserialize)]
+    struct ServeReq {
+        path: String,
+        port: u16,
+        name: String,
+    }
+
+    let req: ServeReq = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (400, "application/json", format!(r#"{{"error":"Invalid request: {}"}}"#, e));
+        }
+    };
+
+    // Resolve path
+    let abs_path = std::path::Path::new(&req.path)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(&req.path));
+
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("visor"));
+
+    match client::send_request(Request::Start {
+        cmd: exe.to_string_lossy().to_string(),
+        args: vec![
+            "serve-internal".to_string(),
+            "--path".to_string(),
+            abs_path.to_string_lossy().to_string(),
+            "--port".to_string(),
+            req.port.to_string(),
+        ],
+        name: req.name,
+        agent: None,
+        group: Some("fileserver".to_string()),
+        cwd: None,
+        kill_code: None,
+        io_mode: IoMode::Capture,
+        restart: false,
+        watch_exe: None,
+    }) {
         Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
         Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
     }
@@ -205,6 +317,8 @@ impl wry::raw_window_handle::HasWindowHandle for HwndWrapper {
 
 fn open_webview(url: &str) -> Result<()> {
     use wry::WebViewBuilder;
+    use wry::Rect;
+    use wry::dpi::{LogicalPosition, LogicalSize};
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::core::*;
 
@@ -239,18 +353,36 @@ fn open_webview(url: &str) -> Result<()> {
         )
         .context("CreateWindowExW failed")?;
 
+        // Get the client area size
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        let w = (rect.right - rect.left) as f64;
+        let h = (rect.bottom - rect.top) as f64;
+
         let wrapper = HwndWrapper(hwnd.0 as isize);
 
-        let _webview = WebViewBuilder::new()
+        let webview = WebViewBuilder::new()
             .with_url(url)
+            .with_bounds(Rect {
+                position: LogicalPosition::new(0.0, 0.0).into(),
+                size: LogicalSize::new(w, h).into(),
+            })
             .build_as_child(&wrapper)
             .context("Failed to create WebView2")?;
+
+        // Store webview pointer for resize handling
+        let webview_box = Box::new(webview);
+        let webview_ptr = Box::into_raw(webview_box);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, webview_ptr as isize);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).into() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+
+        // Clean up webview
+        let _ = Box::from_raw(webview_ptr);
     }
 
     Ok(())
@@ -262,14 +394,27 @@ unsafe extern "system" fn wnd_proc(
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
+    use wry::Rect;
+    use wry::dpi::{LogicalPosition, LogicalSize};
     use windows::Win32::UI::WindowsAndMessaging::*;
+
     match msg {
         WM_DESTROY => {
             PostQuitMessage(0);
             windows::Win32::Foundation::LRESULT(0)
         }
         WM_SIZE => {
-            // Let the webview handle its own resizing
+            let webview_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut wry::WebView;
+            if !webview_ptr.is_null() {
+                let mut rect = windows::Win32::Foundation::RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let w = (rect.right - rect.left) as f64;
+                let h = (rect.bottom - rect.top) as f64;
+                let _ = (*webview_ptr).set_bounds(Rect {
+                    position: LogicalPosition::new(0.0, 0.0).into(),
+                    size: LogicalSize::new(w, h).into(),
+                });
+            }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

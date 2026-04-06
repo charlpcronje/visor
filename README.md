@@ -20,164 +20,203 @@ Or use the build script:
 ## Quick Start
 
 ```bash
-# Start a background process (capture mode - output logged to file)
-visor start --name api --mode capture python server.py
+# Just run visor — if you're at a terminal, the GUI dashboard opens automatically
+visor
 
-# Start a transparent process (inherits your terminal)
-visor start --name dev npm run dev
+# Start a process (transparent by default — inherits your terminal)
+visor start --name api python server.py
+
+# Start backgrounded with output captured to a log file
+visor start --name worker --mode capture node worker.js
 
 # List running apps
 visor list
 
 # Stop an app
 visor stop api
-
-# Check daemon status
-visor status
 ```
 
-## Architecture
+## Smart Launch
 
-Visor has two internal modes:
+When you run `visor` with no arguments:
+- **Interactive terminal** (you typing) → opens the GUI dashboard
+- **Piped/automated** (agent or script) → shows the help text
+
+This means you can just type `visor` to get the dashboard, while agents always get the CLI reference.
+
+## Architecture
 
 - **CLI client**: Short-lived command that sends instructions to the daemon and exits
 - **Background daemon**: Persistent hidden process that owns state, tracking, and process control
 
-The daemon starts automatically on first use. Subsequent CLI calls connect to the existing daemon via a Windows named pipe (`\\.\pipe\visor-control`). State is persisted in SQLite (`C:\dev\scripts\visor.db`).
+The daemon starts automatically on first use. Subsequent CLI calls connect via a Windows named pipe (`\\.\pipe\visor-control`). State is persisted in SQLite (`C:\dev\scripts\visor.db`).
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `visor` | Show help |
+| `visor` | GUI (interactive) or help (piped) |
 | `visor status` | Daemon health and summary |
-| `visor daemon` | Start the background daemon explicitly |
 | `visor start` | Start a process through visor |
 | `visor list` | List running tracked apps |
 | `visor stop` | Stop a tracked app |
 | `visor stop-all` | Stop all tracked apps |
-| `visor cleanup` | Force reconciliation, remove stale entries |
-| `visor attach` | Attach to a captured app's live output |
-| `visor logs` | Show log file path for a captured app |
-| `visor gui` | Open the WebView2 GUI dashboard |
+| `visor cleanup` | Remove stale entries |
+| `visor attach` | Tail a captured app's live output |
+| `visor logs` | Show log file path |
+| `visor serve` | Start a static file server |
+| `visor gui` | Open the GUI dashboard on a specific port |
+| `visor help-all` | Full reference with all options and examples |
 
 ## Starting Processes
 
 ```bash
-# Basic start (transparent mode - inherits terminal)
-visor start --name myapp python server.py
+# Transparent mode (default) — inherits your terminal, stdin/stdout work normally
+visor start --name api python server.py
+visor start --name dev npm run dev
+visor start --name app C:\path\to\app.exe --some-flag
 
-# Capture mode (output saved to log file, runs backgrounded)
-visor start --name api --mode capture python server.py
+# Capture mode — backgrounded, output logged, no stdin
+visor start --name worker --mode capture node worker.js
 
-# With agent and group metadata
-visor start --name frontend --agent claude --group project-x --mode capture npm run dev
+# With metadata for filtering
+visor start --name frontend --agent claude --group project-x npm run dev
 
-# With kill code protection
-visor start --name critical-api --kill-code 1234 --mode capture python server.py
+# With kill code protection (4-digit code required to stop)
+visor start --name critical --kill-code 1234 python server.py
 
-# With custom working directory
-visor start --name backend --cwd C:\projects\api --mode capture cargo run
+# Auto-restart on exit
+visor start --name resilient --restart --mode capture python server.py
+
+# Hot-reload: watch an exe and restart when it's recompiled
+visor start --name myapp --watch-exe C:\project\target\debug\myapp.exe --mode capture C:\project\target\debug\myapp.exe
 ```
 
 ## I/O Modes
 
 | Mode | Behavior |
 |------|----------|
-| `transparent` (default) | Process inherits your terminal's stdin/stdout/stderr. Looks like running the command directly. CLI waits for the process to exit. |
-| `capture` | Output is saved to a log file in `C:\dev\scripts\visor-logs\`. Process runs fully backgrounded. Use `visor attach` to view live output. |
+| `transparent` (default) | Process gets a real pseudo-terminal (ConPTY). stdin/stdout/stderr work exactly like running the command directly. Libraries like rustyline, crossterm see a real TTY. |
+| `capture` | Output saved to `C:\dev\scripts\visor-logs\<id>.log`. No stdin. Use `visor attach` to view live output. Only for headless workers and background services. |
+
+**Do NOT use `--mode capture` for interactive apps** — they will exit immediately because there is no stdin.
+
+## Auto-Restart
+
+```bash
+# Restart automatically when the process exits
+visor start --name api --restart --mode capture python server.py
+```
+
+The daemon checks every 2 seconds and relaunches dead apps that have `--restart`.
+
+## Hot-Reload (Watch Exe)
+
+```bash
+# Restart when the executable file is overwritten (e.g. after recompilation)
+visor start --name myapp --watch-exe C:\project\target\debug\myapp.exe --mode capture C:\project\target\debug\myapp.exe
+```
+
+When the watched file changes:
+1. Visor stops the running process
+2. Waits for the file to stabilize (not mid-write)
+3. Restarts with the same command and arguments
+
+## Static File Server
+
+```bash
+# Serve current directory on a random free port
+visor serve
+
+# Specify path, port, and name
+visor serve --path C:\projects\site --port 3000 --name mysite
+```
+
+Each `visor serve` picks a unique random port unless `--port` is given. Serves `index.html` if present, otherwise shows a directory listing.
 
 ## Kill Code Protection
 
-Protect important processes from accidental termination:
-
 ```bash
-# Start with a 4-digit kill code
-visor start --name important-api --kill-code 1234 --mode capture python server.py
+# Protect an app with a 4-digit code
+visor start --name important --kill-code 1234 --mode capture python server.py
 
 # Stop requires the correct code
-visor stop important-api --code 1234
+visor stop important --code 1234
 
 # Master code (4334) always works
-visor stop important-api --code 4334
+visor stop important --code 4334
+visor stop-all --code 4334
 ```
 
-## Filtering
+## Filtering and Bulk Operations
 
 ```bash
-# List by agent
-visor list --agent claude
+visor list --agent claude         # filter by agent
+visor list --group project-x      # filter by group
+visor list --json                 # JSON output
 
-# List by group
-visor list --group project-x
-
-# JSON output
-visor list --json
-
-# Stop all apps by agent
-visor stop --agent claude
-
-# Stop all apps in a group
-visor stop --group project-x
+visor stop --agent claude         # stop all for an agent
+visor stop --group project-x      # stop all in a group
+visor stop-all                    # stop everything
 ```
 
 ## Attaching to Captured Output
 
 ```bash
-# Tail live output (capture mode only)
-visor attach api
-
-# View full output history from start
-visor attach api --history
+visor attach api                  # tail live output
+visor attach api --history        # full output from start
+visor logs api                    # show log file path
 ```
 
 ## GUI Dashboard
 
 ```bash
-# Open the WebView2 dashboard (default port 9847)
-visor gui
-
-# Custom port
-visor gui --port 4173
+visor gui                         # open on default port 9847
+visor gui --port 4173             # custom port
 ```
 
-The GUI provides:
-- Live dashboard with all running processes
-- Process stats (uptime, mode, agent, group)
-- Stop/cleanup controls
-- History view
-- Embedded xterm.js terminal for viewing captured process output
+The dashboard includes:
+- Live process list with stats (uptime, mode, agent, group)
+- Stop/cleanup controls per-process and bulk
+- History view of all past processes
+- **Embedded xterm.js terminal** for viewing captured process output live
+- **File server controls** — host any directory with one click
+- **Project scanner** — detects package.json, Cargo.toml, pyproject.toml, go.mod, deno.json, composer.json and shows runnable commands (npm run dev, cargo build, etc.) that you can launch with a click
 
 ## Process Safety
 
 Visor uses **Windows Job Objects** for safe process containment:
 
 - Each tracked app gets its own Job Object
-- Stop operations terminate only the target process and its descendants
-- Visor **never** kills parent shells, VS Code, or unrelated ancestor processes
-- Only Visor-owned processes can be listed and stopped
+- Stop operations terminate only the target and its descendants
+- **Never** kills parent shells, VS Code, or unrelated ancestors
+- Transparent mode uses **ConPTY** for a real pseudo-terminal
 
 ## Module Layout
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | CLI entrypoint and bootstrap |
-| `src/cli.rs` | Command parsing (clap) |
-| `src/client.rs` | Connect to daemon, send commands |
-| `src/daemon.rs` | Daemon event loop, singleton logic |
-| `src/supervisor.rs` | Request handling, reconciliation |
+| `src/main.rs` | CLI entrypoint, smart launch detection |
+| `src/cli.rs` | Command parsing (clap) with tiered help |
+| `src/client.rs` | Connect to daemon, ConPTY transparent mode |
+| `src/daemon.rs` | Daemon loop, auto-restart, exe watcher |
+| `src/supervisor.rs` | Request handling, reconciliation, restart logic |
 | `src/job.rs` | Windows Job Object management |
 | `src/process.rs` | Process launching and state checks |
+| `src/pty.rs` | ConPTY pseudo-terminal for transparent mode |
 | `src/registry.rs` | SQLite persistence |
 | `src/ipc.rs` | Named pipe transport |
 | `src/models.rs` | Shared data structures |
-| `src/gui.rs` | WebView2 GUI server |
+| `src/gui.rs` | WebView2 GUI server + HTTP API |
+| `src/dashboard.html` | Dashboard SPA (xterm.js, project scanner) |
+| `src/fileserver.rs` | Static file server |
+| `src/scanner.rs` | Project detector (node, rust, python, go, deno, php) |
 
 ## Requirements
 
 - Windows 10/11
 - Rust stable
-- WebView2 Runtime (for GUI mode, pre-installed on Windows 11)
+- WebView2 Runtime (for GUI, pre-installed on Windows 11)
 
 ## License
 
