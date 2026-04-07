@@ -156,3 +156,43 @@ pub fn terminate_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Get memory usage (working set) for a process.
+pub fn get_process_memory(pid: u32) -> Option<u64> {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, false, pid).ok()?;
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ok = GetProcessMemoryInfo(handle, &mut counters, size).is_ok();
+        let _ = CloseHandle(handle);
+        if ok {
+            Some(counters.WorkingSetSize as u64)
+        } else {
+            None
+        }
+    }
+}
+
+/// Get CPU usage estimate for a process (returns kernel+user time in 100ns units).
+/// Call twice with a delay and diff to get percentage.
+pub fn get_process_times(pid: u32) -> Option<(u64, u64)> {
+    use windows::Win32::System::Threading::GetProcessTimes;
+    use windows::Win32::Foundation::FILETIME;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, false, pid).ok()?;
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user).is_ok();
+        let _ = CloseHandle(handle);
+        if ok {
+            let k = (kernel.dwHighDateTime as u64) << 32 | kernel.dwLowDateTime as u64;
+            let u = (user.dwHighDateTime as u64) << 32 | user.dwLowDateTime as u64;
+            Some((k, u))
+        } else {
+            None
+        }
+    }
+}
+

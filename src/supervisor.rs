@@ -4,7 +4,8 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::job::JobManager;
-use crate::models::{AppRecord, AppStatus, IoMode, Request, Response, DB_PATH, LOG_DIR, MASTER_KILL_CODE, PIPE_NAME};
+use crate::activity;
+use crate::models::{AppProfile, AppRecord, AppStatus, IoMode, Request, Response, DB_PATH, LOG_DIR, MASTER_KILL_CODE, PIPE_NAME};
 use crate::process;
 use crate::registry::Registry;
 use crate::scanner;
@@ -83,6 +84,13 @@ impl Supervisor {
             Request::Attach { name, id } => self.handle_attach(name, id),
             Request::Logs { name, id } => self.handle_attach(name, id),
             Request::Scan { path } => self.handle_scan(path),
+            Request::AppAdd { profile } => self.handle_app_add(profile),
+            Request::AppList => self.handle_app_list(),
+            Request::AppGet { name } => self.handle_app_get(name),
+            Request::AppRemove { name } => self.handle_app_remove(name),
+            Request::AppUpdate { profile } => self.handle_app_add(profile), // upsert
+            Request::AppActivity { name } => self.handle_app_activity(name),
+            Request::AppRunCmd { app_name, cmd_index } => self.handle_app_run_cmd(app_name, cmd_index),
         }
     }
 
@@ -495,6 +503,76 @@ impl Supervisor {
     fn handle_scan(&self, path: String) -> Response {
         let projects = scanner::scan(&path);
         Response::ScanResult { projects }
+    }
+
+    fn handle_app_add(&self, profile: AppProfile) -> Response {
+        match self.registry.save_app(&profile) {
+            Ok(()) => Response::AppProfile { profile },
+            Err(e) => Response::Error { message: format!("Failed to save app: {e}") },
+        }
+    }
+
+    fn handle_app_list(&self) -> Response {
+        match self.registry.list_saved_apps() {
+            Ok(profiles) => Response::AppProfiles { profiles },
+            Err(e) => Response::Error { message: format!("Failed to list apps: {e}") },
+        }
+    }
+
+    fn handle_app_get(&self, name: String) -> Response {
+        match self.registry.get_saved_app(&name) {
+            Ok(Some(profile)) => Response::AppProfile { profile },
+            Ok(None) => Response::Error { message: format!("No saved app '{name}'") },
+            Err(e) => Response::Error { message: e.to_string() },
+        }
+    }
+
+    fn handle_app_remove(&self, name: String) -> Response {
+        match self.registry.remove_saved_app(&name) {
+            Ok(true) => Response::Ok { message: format!("Removed '{name}'") },
+            Ok(false) => Response::Error { message: format!("No saved app '{name}'") },
+            Err(e) => Response::Error { message: e.to_string() },
+        }
+    }
+
+    fn handle_app_activity(&self, name: String) -> Response {
+        match self.registry.get_saved_app(&name) {
+            Ok(Some(profile)) => {
+                let act = activity::check_activity(&profile.id, &profile.path);
+                Response::AppActivityResult { activity: act }
+            }
+            Ok(None) => Response::Error { message: format!("No saved app '{name}'") },
+            Err(e) => Response::Error { message: e.to_string() },
+        }
+    }
+
+    fn handle_app_run_cmd(&self, app_name: String, cmd_index: usize) -> Response {
+        let profile = match self.registry.get_saved_app(&app_name) {
+            Ok(Some(p)) => p,
+            Ok(None) => return Response::Error { message: format!("No saved app '{app_name}'") },
+            Err(e) => return Response::Error { message: e.to_string() },
+        };
+
+        let cmd = match profile.commands.get(cmd_index) {
+            Some(c) => c,
+            None => return Response::Error { message: format!("Command index {cmd_index} out of range") },
+        };
+
+        // Generate a unique run name
+        let run_name = format!("{}-{}", app_name, cmd.category);
+
+        self.handle_start(
+            cmd.cmd.clone(),
+            cmd.args.clone(),
+            run_name,
+            None,
+            Some(app_name),
+            Some(cmd.cwd.clone()),
+            None,
+            IoMode::Capture,
+            false,
+            None,
+        )
     }
 
     /// Reconcile and auto-restart apps that have restart=true.

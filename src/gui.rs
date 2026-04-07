@@ -60,6 +60,26 @@ fn serve_api(server: Arc<tiny_http::Server>) {
                 let _ = request.as_reader().read_to_string(&mut body_buf);
                 handle_api_run_cmd(&body_buf)
             }
+            // Saved apps API
+            ("GET", "/api/apps") => handle_api_apps_list(),
+            ("POST", "/api/apps") => {
+                let mut b = String::new();
+                let _ = request.as_reader().read_to_string(&mut b);
+                handle_api_apps_save(&b)
+            }
+            ("DELETE", p) if p.starts_with("/api/apps/") => {
+                let name = p.strip_prefix("/api/apps/").unwrap_or("");
+                handle_api_apps_remove(&urlencoding_decode(name))
+            }
+            ("GET", p) if p.starts_with("/api/apps/") && p.ends_with("/activity") => {
+                let name = p.strip_prefix("/api/apps/").unwrap_or("")
+                    .strip_suffix("/activity").unwrap_or("");
+                handle_api_apps_activity(&urlencoding_decode(name))
+            }
+            ("POST", p) if p.starts_with("/api/apps/") && p.contains("/run/") => {
+                handle_api_apps_run(p)
+            }
+            ("GET", "/api/metrics") => handle_api_metrics(),
             ("POST", "/api/serve") => {
                 let mut body_buf = String::new();
                 let _ = request.as_reader().read_to_string(&mut body_buf);
@@ -125,6 +145,79 @@ fn handle_api_cleanup() -> (i32, &'static str, String) {
         Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
         Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
     }
+}
+
+fn handle_api_apps_list() -> (i32, &'static str, String) {
+    match client::send_request(Request::AppList) {
+        Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn handle_api_apps_save(body: &str) -> (i32, &'static str, String) {
+    use crate::models::AppProfile;
+    let profile: AppProfile = match serde_json::from_str(body) {
+        Ok(p) => p,
+        Err(e) => return (400, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    };
+    match client::send_request(Request::AppAdd { profile }) {
+        Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn handle_api_apps_remove(name: &str) -> (i32, &'static str, String) {
+    match client::send_request(Request::AppRemove { name: name.to_string() }) {
+        Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn handle_api_apps_activity(name: &str) -> (i32, &'static str, String) {
+    match client::send_request(Request::AppActivity { name: name.to_string() }) {
+        Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn handle_api_apps_run(path: &str) -> (i32, &'static str, String) {
+    // /api/apps/<name>/run/<index>
+    let parts: Vec<&str> = path.strip_prefix("/api/apps/").unwrap_or("").split("/run/").collect();
+    let name = urlencoding_decode(parts.first().unwrap_or(&""));
+    let idx: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    match client::send_request(Request::AppRunCmd { app_name: name, cmd_index: idx }) {
+        Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn handle_api_metrics() -> (i32, &'static str, String) {
+    // Get running apps and their CPU/memory
+    match client::send_request(Request::List { agent: None, group: None, json: true }) {
+        Ok(crate::models::Response::AppList { apps }) => {
+            let metrics: Vec<serde_json::Value> = apps.iter().map(|app| {
+                let mem = crate::process::get_process_memory(app.pid).unwrap_or(0);
+                let mem_display = format_mem(mem);
+                serde_json::json!({
+                    "name": app.name,
+                    "pid": app.pid,
+                    "memory_bytes": mem,
+                    "memory_display": mem_display,
+                })
+            }).collect();
+            (200, "application/json", serde_json::to_string(&metrics).unwrap_or_default())
+        }
+        Ok(resp) => (200, "application/json", serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => (500, "application/json", format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn format_mem(bytes: u64) -> String {
+    if bytes < 1024 { format!("{bytes} B") }
+    else if bytes < 1024 * 1024 { format!("{:.1} KB", bytes as f64 / 1024.0) }
+    else if bytes < 1024 * 1024 * 1024 { format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)) }
+    else { format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)) }
 }
 
 fn handle_api_scan(path: &str) -> (i32, &'static str, String) {

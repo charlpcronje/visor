@@ -138,6 +138,14 @@ pub enum Request {
     Scan {
         path: String,
     },
+    /// Saved apps CRUD
+    AppAdd { profile: AppProfile },
+    AppList,
+    AppGet { name: String },
+    AppRemove { name: String },
+    AppUpdate { profile: AppProfile },
+    AppActivity { name: String },
+    AppRunCmd { app_name: String, cmd_index: usize },
     /// Get log path for a process
     Logs {
         name: Option<String>,
@@ -177,12 +185,64 @@ pub enum Response {
     ScanResult {
         projects: Vec<crate::scanner::Project>,
     },
+    AppProfiles {
+        profiles: Vec<AppProfile>,
+    },
+    AppProfile {
+        profile: AppProfile,
+    },
+    AppActivityResult {
+        activity: AppActivity,
+    },
+    AppMetrics {
+        metrics: Vec<(String, ProcessMetrics)>, // (app_name, metrics)
+    },
     Ok {
         message: String,
     },
     Error {
         message: String,
     },
+}
+
+/// A saved app profile with grouped commands, tags, and description.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppProfile {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub commands: Vec<AppCommand>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppCommand {
+    pub label: String,
+    pub category: String,  // dev, build, run, test, terminal, vscode, custom
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+}
+
+/// Activity info for a saved app.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppActivity {
+    pub app_id: String,
+    pub last_file_modified: Option<String>,
+    pub last_git_commit: Option<String>,
+    pub last_git_message: Option<String>,
+    pub staleness: String,  // "active", "recent", "stale"
+}
+
+/// Resource usage for a running process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessMetrics {
+    pub pid: u32,
+    pub cpu_percent: f64,
+    pub memory_bytes: u64,
+    pub memory_display: String,
 }
 
 pub const PIPE_NAME: &str = r"\\.\pipe\visor-control";

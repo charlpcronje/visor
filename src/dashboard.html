@@ -95,6 +95,44 @@
   /* Panels hidden by default */
   .panel { display: none; }
   .panel.visible { display: block; }
+  /* App cards */
+  .app-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 14px; }
+  .app-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; position: relative; transition: border-color 0.2s;
+  }
+  .app-card:hover { border-color: var(--accent); }
+  .app-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .app-card-header h3 { font-size: 1em; font-weight: 600; margin: 0; }
+  .activity-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .activity-dot.active { background: var(--green); }
+  .activity-dot.recent { background: var(--yellow); }
+  .activity-dot.stale { background: var(--red); }
+  .app-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+  .app-tag {
+    font-size: 0.7em; padding: 2px 8px; border-radius: 10px;
+    background: rgba(88,166,255,0.12); color: var(--accent);
+  }
+  .app-desc { font-size: 0.82em; color: var(--text-dim); margin-bottom: 10px; max-height: 40px; overflow: hidden; }
+  .app-cmds { display: flex; flex-wrap: wrap; gap: 4px; }
+  .cmd-btn {
+    padding: 4px 10px; border-radius: 4px; cursor: pointer; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 0.78em; transition: all 0.15s;
+  }
+  .cmd-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .cmd-btn.dev { border-color: var(--green); color: var(--green); }
+  .cmd-btn.build { border-color: var(--yellow); color: var(--yellow); }
+  .cmd-btn.run { border-color: var(--accent); color: var(--accent); }
+  .cmd-btn.test { border-color: var(--purple); color: var(--purple); }
+  .cmd-btn.vscode { border-color: #007acc; color: #007acc; }
+  .cmd-btn.terminal { border-color: #8b949e; color: #8b949e; }
+  .app-meta { font-size: 0.72em; color: var(--text-dim); margin-top: 8px; display: flex; gap: 12px; }
+  .app-resource { font-size: 0.78em; color: var(--text-dim); }
+  .app-card .remove-btn {
+    position: absolute; top: 8px; right: 8px; background: none; border: none;
+    color: var(--text-dim); cursor: pointer; font-size: 1em; padding: 2px 6px;
+  }
+  .app-card .remove-btn:hover { color: var(--red); }
   /* Serve bar */
   .serve-bar {
     display: flex; align-items: center; gap: 10px;
@@ -153,11 +191,24 @@
 
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
   <div class="tabs">
+    <div class="tab" data-tab="apps" onclick="switchTab('apps')">My Apps</div>
     <div class="tab active" data-tab="running" onclick="switchTab('running')">Running</div>
     <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
-    <div class="tab" data-tab="projects" onclick="switchTab('projects')">Projects</div>
+    <div class="tab" data-tab="projects" onclick="switchTab('projects')">Scan</div>
   </div>
   <div class="refresh-info">Auto-refresh every 3s</div>
+</div>
+
+<div id="panel-apps" class="panel">
+  <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
+    <input type="text" class="path-input" id="app-add-path" placeholder="Project path..." style="background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 10px;font-size:0.9em;flex:1;">
+    <input type="text" id="app-add-name" placeholder="App name" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 10px;font-size:0.9em;width:150px;">
+    <button class="btn" onclick="addApp()">Add App</button>
+    <button class="btn" onclick="loadApps()">Refresh</button>
+  </div>
+  <div class="app-grid" id="apps-grid">
+    <div class="empty-state"><p>No saved apps. Add one above.</p></div>
+  </div>
 </div>
 
 <div id="panel-running" class="panel visible">
@@ -441,6 +492,158 @@ function esc(s) {
   return d.innerHTML;
 }
 
+// ---- My Apps ----
+let savedApps = [];
+let appActivities = {};
+let appMetrics = {};
+
+async function loadApps() {
+  try {
+    const r = await fetch('/api/apps');
+    const data = await r.json();
+    if (data.AppProfiles) {
+      savedApps = data.AppProfiles.profiles || [];
+    } else if (Array.isArray(data)) {
+      savedApps = data;
+    }
+    // Load activities in parallel
+    for (const app of savedApps) {
+      fetch('/api/apps/' + encodeURIComponent(app.name) + '/activity')
+        .then(r => r.json())
+        .then(data => {
+          if (data.AppActivityResult) appActivities[app.name] = data.AppActivityResult.activity;
+          renderApps();
+        })
+        .catch(() => {});
+    }
+    // Load metrics
+    fetch('/api/metrics').then(r => r.json()).then(data => {
+      if (Array.isArray(data)) {
+        appMetrics = {};
+        data.forEach(m => { appMetrics[m.name] = m; });
+      }
+      renderApps();
+    }).catch(() => {});
+    renderApps();
+  } catch(e) { console.error('loadApps failed', e); }
+}
+
+async function addApp() {
+  const path = document.getElementById('app-add-path').value.trim();
+  const name = document.getElementById('app-add-name').value.trim();
+  if (!path || !name) { alert('Enter both a path and a name'); return; }
+
+  // Scan for commands first
+  const scanR = await fetch('/api/scan?path=' + encodeURIComponent(path));
+  const projects = await scanR.json();
+  let commands = [];
+  if (Array.isArray(projects) && projects.length > 0) {
+    // Use commands from the first matching project
+    const proj = projects[0];
+    commands = (proj.commands || []).map(c => ({
+      label: c.label,
+      category: guessCategory(c.label),
+      cmd: c.cmd,
+      args: c.args,
+      cwd: c.cwd,
+    }));
+  }
+  // Add standard actions
+  commands.push({ label: 'Open Terminal', category: 'terminal', cmd: 'cmd', args: ['/k', 'cd /d ' + path], cwd: path });
+  commands.push({ label: 'Open in VS Code', category: 'vscode', cmd: 'code', args: [path], cwd: path });
+
+  const profile = {
+    id: crypto.randomUUID(),
+    name, path,
+    description: '',
+    tags: [],
+    commands,
+    created_at: new Date().toISOString(),
+  };
+  await fetch('/api/apps', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(profile),
+  });
+  document.getElementById('app-add-path').value = '';
+  document.getElementById('app-add-name').value = '';
+  loadApps();
+}
+
+async function removeApp(name) {
+  if (!confirm('Remove ' + name + '?')) return;
+  await fetch('/api/apps/' + encodeURIComponent(name), { method: 'DELETE' });
+  loadApps();
+}
+
+async function runAppCmd(appName, cmdIndex) {
+  await fetch('/api/apps/' + encodeURIComponent(appName) + '/run/' + cmdIndex, { method: 'POST' });
+  refresh();
+}
+
+function guessCategory(label) {
+  const l = label.toLowerCase();
+  if (l.includes('dev') || l.includes('serve') || l.includes('watch')) return 'dev';
+  if (l.includes('build') || l.includes('compile')) return 'build';
+  if (l.includes('test')) return 'test';
+  if (l.includes('start') || l.match(/\brun\b/)) return 'run';
+  if (l.includes('install') || l.includes('tidy')) return 'setup';
+  return 'custom';
+}
+
+function renderApps() {
+  const grid = document.getElementById('apps-grid');
+  if (savedApps.length === 0) {
+    grid.innerHTML = '<div class="empty-state"><p>No saved apps. Add one above.</p></div>';
+    return;
+  }
+
+  grid.innerHTML = savedApps.map(app => {
+    const act = appActivities[app.name];
+    const staleness = act ? act.staleness : 'stale';
+    const lastCommit = act && act.last_git_message ? act.last_git_message : '';
+    const lastFile = act && act.last_file_modified ? act.last_file_modified : '';
+
+    const tags = (app.tags || []).map(t =>
+      `<span class="app-tag">${esc(t)}</span>`
+    ).join('');
+
+    const cmds = (app.commands || []).map((c, i) => {
+      const cat = c.category || 'custom';
+      return `<button class="cmd-btn ${cat}" onclick="runAppCmd('${esc(app.name)}',${i})" title="${esc(c.label)}">${esc(c.label)}</button>`;
+    }).join('');
+
+    // Check if any running process belongs to this app
+    const running = allApps.filter(a => a.group_name === app.name && a.status === 'running');
+    const resourceHtml = running.map(r => {
+      const m = appMetrics[r.name];
+      const mem = m ? m.memory_display : '-';
+      return `<span class="app-resource">${esc(r.name)}: PID ${r.pid} | ${mem}</span>`;
+    }).join('<br>');
+
+    const desc = app.description ? `<div class="app-desc">${esc(app.description)}</div>` : '';
+
+    return `<div class="app-card">
+      <button class="remove-btn" onclick="removeApp('${esc(app.name)}')" title="Remove">&times;</button>
+      <div class="app-card-header">
+        <div class="activity-dot ${staleness}" title="${staleness}"></div>
+        <h3>${esc(app.name)}</h3>
+        ${tags}
+      </div>
+      ${desc}
+      <div class="app-cmds">${cmds}</div>
+      ${resourceHtml ? `<div class="app-meta">${resourceHtml}</div>` : ''}
+      <div class="app-meta">
+        ${lastFile ? `<span>Last file: ${esc(lastFile)}</span>` : ''}
+        ${lastCommit ? `<span>Last commit: ${esc(lastCommit)}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// Load apps on startup
+loadApps();
+
 // Project scanner
 let scannedProjects = [];
 
@@ -544,7 +747,7 @@ fetch('/api/cwd').then(r => r.json()).then(data => {
 }).catch(() => {});
 
 refresh();
-setInterval(() => { refresh(); checkServeStatus(); }, 3000);
+setInterval(() => { refresh(); checkServeStatus(); loadApps(); }, 5000);
 </script>
 </body>
 </html>

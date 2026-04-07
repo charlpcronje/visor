@@ -201,6 +201,18 @@ pub fn print_response(response: &Response, json_mode: bool) {
         Response::ScanResult { projects } => {
             println!("{}", serde_json::to_string_pretty(projects).unwrap_or_default());
         }
+        Response::AppProfiles { profiles } => {
+            println!("{}", serde_json::to_string_pretty(profiles).unwrap_or_default());
+        }
+        Response::AppProfile { profile } => {
+            println!("Saved app '{}' at {}", profile.name, profile.path);
+        }
+        Response::AppActivityResult { activity } => {
+            println!("{}", serde_json::to_string_pretty(activity).unwrap_or_default());
+        }
+        Response::AppMetrics { metrics } => {
+            println!("{}", serde_json::to_string_pretty(metrics).unwrap_or_default());
+        }
         Response::Ok { message } => {
             println!("{message}");
         }

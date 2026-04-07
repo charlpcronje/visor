@@ -1,3 +1,4 @@
+mod activity;
 mod cli;
 mod client;
 mod daemon;
@@ -13,7 +14,7 @@ mod scanner;
 mod supervisor;
 
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{AppCommands, Cli, Commands};
 use models::{IoMode, Request};
 
 fn main() {
@@ -191,6 +192,8 @@ fn main() {
             fileserver::run(&path, port)
         }
 
+        Some(Commands::App(app_cmd)) => handle_app_command(app_cmd),
+
         Some(Commands::HelpAll) => {
             print!("{}", cli::FULL_HELP);
             Ok(())
@@ -201,6 +204,156 @@ fn main() {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
+}
+
+fn handle_app_command(cmd: AppCommands) -> anyhow::Result<()> {
+    use models::{AppCommand, AppProfile, Request};
+
+    match cmd {
+        AppCommands::Add { name, path, desc, tag } => {
+            let abs_path = std::path::Path::new(&path)
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(&path));
+            let abs_path_str = abs_path.to_string_lossy().to_string();
+
+            // Auto-scan for commands
+            let projects = scanner::scan(&abs_path_str);
+            let mut commands: Vec<AppCommand> = Vec::new();
+
+            for project in &projects {
+                if project.path == abs_path_str {
+                    for pc in &project.commands {
+                        let category = guess_category(&pc.label);
+                        commands.push(AppCommand {
+                            label: pc.label.clone(),
+                            category,
+                            cmd: pc.cmd.clone(),
+                            args: pc.args.clone(),
+                            cwd: pc.cwd.clone(),
+                        });
+                    }
+                }
+            }
+
+            // Add standard quick actions
+            commands.push(AppCommand {
+                label: "Open Terminal".to_string(),
+                category: "terminal".to_string(),
+                cmd: "cmd".to_string(),
+                args: vec!["/k".to_string(), format!("cd /d {abs_path_str}")],
+                cwd: abs_path_str.clone(),
+            });
+            commands.push(AppCommand {
+                label: "Open in VS Code".to_string(),
+                category: "vscode".to_string(),
+                cmd: "code".to_string(),
+                args: vec![abs_path_str.clone()],
+                cwd: abs_path_str.clone(),
+            });
+
+            let profile = AppProfile {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: name.clone(),
+                path: abs_path_str,
+                description: desc,
+                tags: tag,
+                commands,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+
+            let resp = client::send_request(Request::AppAdd { profile })?;
+            client::print_response(&resp, false);
+            Ok(())
+        }
+
+        AppCommands::List => {
+            let resp = client::send_request(Request::AppList)?;
+            match &resp {
+                models::Response::AppProfiles { profiles } => {
+                    if profiles.is_empty() {
+                        println!("No saved apps. Use 'visor app add' to add one.");
+                    } else {
+                        println!("{:<20} {:<12} {:<6} {}", "NAME", "KIND", "CMDS", "PATH");
+                        println!("{}", "-".repeat(80));
+                        for p in profiles {
+                            let tags = if p.tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" [{}]", p.tags.join(", "))
+                            };
+                            println!(
+                                "{:<20} {:<12} {:<6} {}{}",
+                                p.name,
+                                p.tags.first().unwrap_or(&"-".to_string()),
+                                p.commands.len(),
+                                p.path,
+                                tags,
+                            );
+                        }
+                    }
+                }
+                _ => client::print_response(&resp, false),
+            }
+            Ok(())
+        }
+
+        AppCommands::Get { name } => {
+            let resp = client::send_request(Request::AppGet { name })?;
+            match &resp {
+                models::Response::AppProfile { profile } => {
+                    println!("{}", serde_json::to_string_pretty(profile).unwrap_or_default());
+                }
+                _ => client::print_response(&resp, false),
+            }
+            Ok(())
+        }
+
+        AppCommands::Remove { name } => {
+            let resp = client::send_request(Request::AppRemove { name })?;
+            client::print_response(&resp, false);
+            Ok(())
+        }
+
+        AppCommands::Run { name, cmd } => {
+            // First get the app to find the command
+            let resp = client::send_request(Request::AppGet { name: name.clone() })?;
+            match resp {
+                models::Response::AppProfile { profile } => {
+                    // Find command by category or label substring
+                    let idx = profile.commands.iter().position(|c| {
+                        c.category == cmd || c.label.to_lowercase().contains(&cmd.to_lowercase())
+                    });
+                    match idx {
+                        Some(i) => {
+                            let resp = client::send_request(Request::AppRunCmd {
+                                app_name: name,
+                                cmd_index: i,
+                            })?;
+                            client::print_response(&resp, false);
+                        }
+                        None => {
+                            eprintln!("No command matching '{}'. Available:", cmd);
+                            for c in &profile.commands {
+                                eprintln!("  [{}] {}", c.category, c.label);
+                            }
+                        }
+                    }
+                }
+                _ => client::print_response(&resp, false),
+            }
+            Ok(())
+        }
+    }
+}
+
+fn guess_category(label: &str) -> String {
+    let l = label.to_lowercase();
+    if l.contains("dev") || l.contains("serve") || l.contains("watch") { "dev".to_string() }
+    else if l.contains("build") || l.contains("compile") { "build".to_string() }
+    else if l.contains("test") { "test".to_string() }
+    else if l.contains("start") || l.contains("run") { "run".to_string() }
+    else if l.contains("install") || l.contains("tidy") { "setup".to_string() }
+    else { "custom".to_string() }
 }
 
 /// Check if we're running in an interactive terminal (human user) vs piped/automated (agent).

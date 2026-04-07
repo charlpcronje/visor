@@ -285,6 +285,58 @@ pub enum Commands {
         port: u16,
     },
 
+    /// Manage saved apps
+    #[command(subcommand)]
+    App(AppCommands),
+
     /// Show full reference with all options, examples, and modes explained
     HelpAll,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AppCommands {
+    /// Add or update a saved app (auto-scans for commands)
+    #[command(after_help = "Examples:\n  visor app add --name myapi --path C:\\projects\\api\n  visor app add --name myapi --path C:\\projects\\api --tag backend --tag api --desc \"REST API server\"")]
+    Add {
+        /// App name (unique identifier)
+        #[arg(long)]
+        name: String,
+
+        /// Path to the project directory
+        #[arg(long)]
+        path: String,
+
+        /// Description (markdown)
+        #[arg(long, default_value = "")]
+        desc: String,
+
+        /// Tags (can be repeated)
+        #[arg(long)]
+        tag: Vec<String>,
+    },
+
+    /// List all saved apps
+    List,
+
+    /// Show details of a saved app
+    Get {
+        /// App name
+        name: String,
+    },
+
+    /// Remove a saved app
+    Remove {
+        /// App name
+        name: String,
+    },
+
+    /// Run a command from a saved app
+    #[command(after_help = "Examples:\n  visor app run myapi dev\n  visor app run frontend build")]
+    Run {
+        /// App name
+        name: String,
+
+        /// Command category to run (dev, build, run, test, or label text)
+        cmd: String,
+    },
 }

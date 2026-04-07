@@ -4,7 +4,7 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::models::{AppRecord, AppStatus, IoMode};
+use crate::models::{AppProfile, AppRecord, AppStatus, IoMode};
 
 pub struct Registry {
     conn: Mutex<Connection>,
@@ -41,6 +41,19 @@ impl Registry {
             );",
         )
         .context("Failed to create apps table")?;
+
+        conn_inner.execute_batch(
+            "CREATE TABLE IF NOT EXISTS saved_apps (
+                id          TEXT PRIMARY KEY,
+                name        TEXT NOT NULL UNIQUE,
+                path        TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                tags_json   TEXT NOT NULL DEFAULT '[]',
+                commands_json TEXT NOT NULL DEFAULT '[]',
+                created_at  TEXT NOT NULL
+            );",
+        )
+        .context("Failed to create saved_apps table")?;
 
         Ok(Self { conn: Mutex::new(conn_inner) })
     }
@@ -177,5 +190,64 @@ impl Registry {
             .filter_map(|a| a.group_name.as_deref())
             .collect();
         Ok(groups.len())
+    }
+
+    // --- Saved Apps ---
+
+    pub fn save_app(&self, profile: &AppProfile) -> Result<()> {
+        let tags_json = serde_json::to_string(&profile.tags)?;
+        let cmds_json = serde_json::to_string(&profile.commands)?;
+        self.conn.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO saved_apps (id, name, path, description, tags_json, commands_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                profile.id,
+                profile.name,
+                profile.path,
+                profile.description,
+                tags_json,
+                cmds_json,
+                profile.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_saved_apps(&self) -> Result<Vec<AppProfile>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, path, description, tags_json, commands_json, created_at FROM saved_apps ORDER BY name"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let tags_str: String = row.get(4)?;
+            let cmds_str: String = row.get(5)?;
+            Ok(AppProfile {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                path: row.get(2)?,
+                description: row.get(3)?,
+                tags: serde_json::from_str(&tags_str).unwrap_or_default(),
+                commands: serde_json::from_str(&cmds_str).unwrap_or_default(),
+                created_at: row.get(6)?,
+            })
+        })?;
+        let mut profiles = Vec::new();
+        for row in rows {
+            profiles.push(row?);
+        }
+        Ok(profiles)
+    }
+
+    pub fn get_saved_app(&self, name: &str) -> Result<Option<AppProfile>> {
+        let all = self.list_saved_apps()?;
+        Ok(all.into_iter().find(|a| a.name == name))
+    }
+
+    pub fn remove_saved_app(&self, name: &str) -> Result<bool> {
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM saved_apps WHERE name = ?1",
+            params![name],
+        )?;
+        Ok(count > 0)
     }
 }
