@@ -152,7 +152,7 @@ fn main() {
             let abs_path = std::path::Path::new(&path)
                 .canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(&path));
-            let abs_path_str = abs_path.to_string_lossy().to_string();
+            let abs_path_str = strip_unc_prefix(&abs_path.to_string_lossy());
 
             // Pick a free port if none specified
             let port = port.unwrap_or_else(find_free_port);
@@ -214,7 +214,14 @@ fn handle_app_command(cmd: AppCommands) -> anyhow::Result<()> {
             let abs_path = std::path::Path::new(&path)
                 .canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(&path));
-            let abs_path_str = abs_path.to_string_lossy().to_string();
+            let abs_path_str = strip_unc_prefix(&abs_path.to_string_lossy());
+
+            // Default name to folder name
+            let name = name.unwrap_or_else(|| {
+                abs_path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "app".to_string())
+            });
 
             // Auto-scan for commands
             let projects = scanner::scan(&abs_path_str);
@@ -354,6 +361,11 @@ fn guess_category(label: &str) -> String {
     else if l.contains("start") || l.contains("run") { "run".to_string() }
     else if l.contains("install") || l.contains("tidy") { "setup".to_string() }
     else { "custom".to_string() }
+}
+
+/// Strip the \\?\ prefix that Windows canonicalize adds.
+fn strip_unc_prefix(s: &str) -> String {
+    s.strip_prefix(r"\\?\").unwrap_or(s).to_string()
 }
 
 /// Check if we're running in an interactive terminal (human user) vs piped/automated (agent).

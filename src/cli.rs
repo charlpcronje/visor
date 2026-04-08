@@ -296,14 +296,14 @@ pub enum Commands {
 #[derive(Subcommand, Debug)]
 pub enum AppCommands {
     /// Add or update a saved app (auto-scans for commands)
-    #[command(after_help = "Examples:\n  visor app add --name myapi --path C:\\projects\\api\n  visor app add --name myapi --path C:\\projects\\api --tag backend --tag api --desc \"REST API server\"")]
+    #[command(after_help = "Path defaults to current directory. Name defaults to folder name.\n\nExamples:\n  visor app add                                    # uses current dir and folder name\n  visor app add --name myapi                       # uses current dir\n  visor app add --path C:\\projects\\api              # uses folder name as app name\n  visor app add --name myapi --path ..\\api --tag backend --desc \"REST API\"")]
     Add {
-        /// App name (unique identifier)
+        /// App name (default: folder name)
         #[arg(long)]
-        name: String,
+        name: Option<String>,
 
-        /// Path to the project directory
-        #[arg(long)]
+        /// Path to the project directory (default: current directory)
+        #[arg(long, default_value = ".")]
         path: String,
 
         /// Description (markdown)
