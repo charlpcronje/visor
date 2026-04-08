@@ -215,6 +215,7 @@ pub struct AppProfile {
     pub tags: Vec<String>,
     pub commands: Vec<AppCommand>,
     pub created_at: String,
+    pub icon: Option<String>,  // path to icon file, or exe path for extraction
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +246,7 @@ pub struct ProcessMetrics {
     pub memory_display: String,
 }
 
+pub const ICON_DIR: &str = r"C:\dev\scripts\visor-icons";
 pub const PIPE_NAME: &str = r"\\.\pipe\visor-control";
 pub const DB_PATH: &str = r"C:\dev\scripts\visor.db";
 pub const LOG_PATH: &str = r"C:\dev\scripts\visor.log";

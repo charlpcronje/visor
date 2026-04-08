@@ -623,10 +623,28 @@ function renderApps() {
 
     const desc = app.description ? `<div class="app-desc">${esc(app.description)}</div>` : '';
 
+    // Icon: extract hash from the icon path if present
+    let iconHtml = '';
+    if (app.icon) {
+      const parts = app.icon.replace(/\\\\/g, '/').split('/');
+      const filename = parts[parts.length - 1].replace('.bmp', '');
+      iconHtml = `<img class="app-icon" data-hash="${filename}" src="" style="width:24px;height:24px;border-radius:4px;image-rendering:pixelated;" onerror="this.style.display='none'">`;
+      // Lazy-load icon
+      setTimeout(() => {
+        fetch('/api/icon/' + filename).then(r => r.json()).then(d => {
+          if (d.data_url) {
+            const img = document.querySelector(`img[data-hash="${filename}"]`);
+            if (img) img.src = d.data_url;
+          }
+        }).catch(() => {});
+      }, 100);
+    }
+
     return `<div class="app-card">
       <button class="remove-btn" onclick="removeApp('${esc(app.name)}')" title="Remove">&times;</button>
       <div class="app-card-header">
         <div class="activity-dot ${staleness}" title="${staleness}"></div>
+        ${iconHtml}
         <h3>${esc(app.name)}</h3>
         ${tags}
       </div>

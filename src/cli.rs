@@ -339,4 +339,28 @@ pub enum AppCommands {
         /// Command category to run (dev, build, run, test, or label text)
         cmd: String,
     },
+
+    /// Scan a directory for projects and add them all as apps
+    #[command(after_help = "First-level subdirectory becomes a tag.\n\nExamples:\n  visor app scan --path C:\\dev\n  visor app scan --path C:\\dev --depth 4")]
+    Scan {
+        /// Root directory to scan
+        #[arg(long, default_value = ".")]
+        path: String,
+
+        /// How many levels deep to search (default: 3)
+        #[arg(long, default_value = "3")]
+        depth: usize,
+    },
+
+    /// Scan a directory for executables and add them as apps (extracts icons)
+    #[command(after_help = "Examples:\n  visor app scan-exes --path C:\\apps\n  visor app scan-exes --path \"C:\\Program Files\"")]
+    ScanExes {
+        /// Directory to scan for .exe files
+        #[arg(long, default_value = ".")]
+        path: String,
+
+        /// How many levels deep to search (default: 2)
+        #[arg(long, default_value = "2")]
+        depth: usize,
+    },
 }

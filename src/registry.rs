@@ -50,7 +50,8 @@ impl Registry {
                 description TEXT NOT NULL DEFAULT '',
                 tags_json   TEXT NOT NULL DEFAULT '[]',
                 commands_json TEXT NOT NULL DEFAULT '[]',
-                created_at  TEXT NOT NULL
+                created_at  TEXT NOT NULL,
+                icon        TEXT
             );",
         )
         .context("Failed to create saved_apps table")?;
@@ -198,8 +199,8 @@ impl Registry {
         let tags_json = serde_json::to_string(&profile.tags)?;
         let cmds_json = serde_json::to_string(&profile.commands)?;
         self.conn.lock().unwrap().execute(
-            "INSERT OR REPLACE INTO saved_apps (id, name, path, description, tags_json, commands_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO saved_apps (id, name, path, description, tags_json, commands_json, created_at, icon)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 profile.id,
                 profile.name,
@@ -208,6 +209,7 @@ impl Registry {
                 tags_json,
                 cmds_json,
                 profile.created_at,
+                profile.icon,
             ],
         )?;
         Ok(())
@@ -216,7 +218,7 @@ impl Registry {
     pub fn list_saved_apps(&self) -> Result<Vec<AppProfile>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, path, description, tags_json, commands_json, created_at FROM saved_apps ORDER BY name"
+            "SELECT id, name, path, description, tags_json, commands_json, created_at, icon FROM saved_apps ORDER BY name"
         )?;
         let rows = stmt.query_map([], |row| {
             let tags_str: String = row.get(4)?;
@@ -229,6 +231,7 @@ impl Registry {
                 tags: serde_json::from_str(&tags_str).unwrap_or_default(),
                 commands: serde_json::from_str(&cmds_str).unwrap_or_default(),
                 created_at: row.get(6)?,
+                icon: row.get(7)?,
             })
         })?;
         let mut profiles = Vec::new();
