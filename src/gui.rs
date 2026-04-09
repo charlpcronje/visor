@@ -516,6 +516,8 @@ fn open_webview(url: &str) -> Result<()> {
     Ok(())
 }
 
+static RESIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 unsafe extern "system" fn wnd_proc(
     hwnd: windows::Win32::Foundation::HWND,
     msg: u32,
@@ -525,6 +527,7 @@ unsafe extern "system" fn wnd_proc(
     use wry::Rect;
     use wry::dpi::{LogicalPosition, LogicalSize};
     use windows::Win32::UI::WindowsAndMessaging::*;
+    use std::sync::atomic::Ordering;
 
     match msg {
         WM_DESTROY => {
@@ -532,16 +535,20 @@ unsafe extern "system" fn wnd_proc(
             windows::Win32::Foundation::LRESULT(0)
         }
         WM_SIZE => {
-            let webview_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut wry::WebView;
-            if !webview_ptr.is_null() {
-                let mut rect = windows::Win32::Foundation::RECT::default();
-                let _ = GetClientRect(hwnd, &mut rect);
-                let w = (rect.right - rect.left) as f64;
-                let h = (rect.bottom - rect.top) as f64;
-                let _ = (*webview_ptr).set_bounds(Rect {
-                    position: LogicalPosition::new(0.0, 0.0).into(),
-                    size: LogicalSize::new(w, h).into(),
-                });
+            // Guard against reentrant set_bounds -> WM_SIZE loop
+            if !RESIZING.swap(true, Ordering::SeqCst) {
+                let webview_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut wry::WebView;
+                if !webview_ptr.is_null() {
+                    let mut rect = windows::Win32::Foundation::RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rect);
+                    let w = (rect.right - rect.left) as f64;
+                    let h = (rect.bottom - rect.top) as f64;
+                    let _ = (*webview_ptr).set_bounds(Rect {
+                        position: LogicalPosition::new(0.0, 0.0).into(),
+                        size: LogicalSize::new(w, h).into(),
+                    });
+                }
+                RESIZING.store(false, Ordering::SeqCst);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
