@@ -516,7 +516,8 @@ fn open_webview(url: &str) -> Result<()> {
     Ok(())
 }
 
-static RESIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_W: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static LAST_H: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 unsafe extern "system" fn wnd_proc(
     hwnd: windows::Win32::Foundation::HWND,
@@ -535,20 +536,24 @@ unsafe extern "system" fn wnd_proc(
             windows::Win32::Foundation::LRESULT(0)
         }
         WM_SIZE => {
-            // Guard against reentrant set_bounds -> WM_SIZE loop
-            if !RESIZING.swap(true, Ordering::SeqCst) {
-                let webview_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut wry::WebView;
-                if !webview_ptr.is_null() {
-                    let mut rect = windows::Win32::Foundation::RECT::default();
-                    let _ = GetClientRect(hwnd, &mut rect);
-                    let w = (rect.right - rect.left) as f64;
-                    let h = (rect.bottom - rect.top) as f64;
+            let webview_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut wry::WebView;
+            if !webview_ptr.is_null() {
+                let mut rect = windows::Win32::Foundation::RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                // Only resize if the size actually changed — avoids infinite loops
+                // from set_bounds triggering WM_SIZE again.
+                let prev_w = LAST_W.load(Ordering::Relaxed);
+                let prev_h = LAST_H.load(Ordering::Relaxed);
+                if w != prev_w || h != prev_h {
+                    LAST_W.store(w, Ordering::Relaxed);
+                    LAST_H.store(h, Ordering::Relaxed);
                     let _ = (*webview_ptr).set_bounds(Rect {
                         position: LogicalPosition::new(0.0, 0.0).into(),
-                        size: LogicalSize::new(w, h).into(),
+                        size: LogicalSize::new(w as f64, h as f64).into(),
                     });
                 }
-                RESIZING.store(false, Ordering::SeqCst);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }

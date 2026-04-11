@@ -20,7 +20,8 @@ pub fn launch_suspended(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_SUSPENDED.0);
+        // CREATE_SUSPENDED | CREATE_NO_WINDOW — prevents empty console windows
+        .creation_flags(CREATE_SUSPENDED.0 | 0x08000000);
 
     if let Some(dir) = cwd {
         command.current_dir(dir);
@@ -68,7 +69,8 @@ pub fn launch_suspended_captured(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
-        .creation_flags(CREATE_SUSPENDED.0);
+        // CREATE_SUSPENDED | CREATE_NO_WINDOW — prevents empty console windows
+        .creation_flags(CREATE_SUSPENDED.0 | 0x08000000);
 
     if let Some(dir) = cwd {
         command.current_dir(dir);

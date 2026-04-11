@@ -25,11 +25,22 @@ use windows::core::PWSTR;
 const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
 
 /// Run a process with a real pseudo-terminal. Returns the exit code.
-pub fn run_with_pty(cmd: &str, args: &[String], cwd: Option<&str>) -> Result<u32> {
-    unsafe { run_with_pty_inner(cmd, args, cwd) }
+/// `on_spawn` is called with the PID once the child process is created.
+pub fn run_with_pty(
+    cmd: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    on_spawn: impl FnOnce(u32),
+) -> Result<u32> {
+    unsafe { run_with_pty_inner(cmd, args, cwd, on_spawn) }
 }
 
-unsafe fn run_with_pty_inner(cmd: &str, args: &[String], cwd: Option<&str>) -> Result<u32> {
+unsafe fn run_with_pty_inner(
+    cmd: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    on_spawn: impl FnOnce(u32),
+) -> Result<u32> {
     // Get current console size for the PTY
     let size = get_console_size().unwrap_or(COORD { X: 120, Y: 30 });
 
@@ -106,6 +117,9 @@ unsafe fn run_with_pty_inner(cmd: &str, args: &[String], cwd: Option<&str>) -> R
     .context("CreateProcessW with ConPTY failed")?;
 
     let _ = CloseHandle(pi.hThread);
+
+    // Notify caller of the actual child PID
+    on_spawn(pi.dwProcessId);
 
     // Clean up attribute list
     DeleteProcThreadAttributeList(attr_list);

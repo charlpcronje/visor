@@ -52,7 +52,7 @@ pub fn run_transparent(
     let id = Uuid::new_v4().to_string();
     let job_name = id.clone();
 
-    // Register with daemon in a background thread so it doesn't delay the child
+    // Capture data needed for registration once the PID is known
     let reg_id = id.clone();
     let reg_cmd = cmd.clone();
     let reg_args = args.clone();
@@ -63,25 +63,26 @@ pub fn run_transparent(
     let reg_kill_code = kill_code.clone();
     let reg_job_name = job_name.clone();
 
-    std::thread::spawn(move || {
-        let _ = send_request(Request::Register {
-            id: reg_id,
-            pid: 0, // will be updated below via a second message, or daemon reconciles
-            cmd: reg_cmd,
-            args: reg_args,
-            name: reg_name,
-            agent: reg_agent,
-            group: reg_group,
-            cwd: reg_cwd,
-            kill_code: reg_kill_code,
-            io_mode: IoMode::Transparent,
-            job_name: reg_job_name,
+    // Use ConPTY. The on_spawn callback registers with the daemon once we have
+    // the real PID. We spawn the registration in a thread so it doesn't block
+    // the PTY setup path.
+    let exit_code = crate::pty::run_with_pty(&cmd, &args, cwd.as_deref(), move |pid| {
+        std::thread::spawn(move || {
+            let _ = send_request(Request::Register {
+                id: reg_id,
+                pid,
+                cmd: reg_cmd,
+                args: reg_args,
+                name: reg_name,
+                agent: reg_agent,
+                group: reg_group,
+                cwd: reg_cwd,
+                kill_code: reg_kill_code,
+                io_mode: IoMode::Transparent,
+                job_name: reg_job_name,
+            });
         });
-    });
-
-    // Use ConPTY: the child gets a real pseudo-terminal, so libraries like
-    // rustyline, crossterm, etc. see a genuine TTY on all handles.
-    let exit_code = crate::pty::run_with_pty(&cmd, &args, cwd.as_deref())?;
+    })?;
 
     std::process::exit(exit_code as i32);
 }
