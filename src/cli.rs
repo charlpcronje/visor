@@ -260,7 +260,7 @@ pub enum Commands {
 
     /// Start a static file server (tracked as a visor process)
     #[command(
-        after_help = "Each invocation picks a random free port unless --port is given.\n\nExamples:\n  visor serve                                   # random port\n  visor serve --path C:\\projects\\site --port 3000 --name mysite"
+        after_help = "Each invocation picks a random free port unless --port is given.\n\nExamples:\n  visor serve                                   # random port\n  visor serve --ts                               # with TypeScript transpilation\n  visor serve --path C:\\projects\\site --port 3000 --name mysite"
     )]
     Serve {
         /// Directory to serve (default: current directory)
@@ -274,6 +274,10 @@ pub enum Commands {
         /// Friendly name for this server (default: fileserver-<port>)
         #[arg(long)]
         name: Option<String>,
+
+        /// Transpile TypeScript (.ts/.tsx) to JavaScript on the fly (uses esbuild/swc/bun/tsc)
+        #[arg(long)]
+        ts: bool,
     },
 
     /// Internal: run the file server directly (used by daemon)
@@ -283,6 +287,11 @@ pub enum Commands {
         path: String,
         #[arg(long)]
         port: u16,
+        #[arg(long)]
+        ts: bool,
+        /// Full path to the transpiler executable (resolved by the CLI)
+        #[arg(long)]
+        transpiler: Option<String>,
     },
 
     /// Manage saved apps

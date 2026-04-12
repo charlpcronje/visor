@@ -149,7 +149,7 @@ fn main() {
             resp.map(|r| client::print_response(&r, false))
         }
 
-        Some(Commands::Serve { path, port, name }) => {
+        Some(Commands::Serve { path, port, name, ts }) => {
             let abs_path = std::path::Path::new(&path)
                 .canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(&path));
@@ -161,15 +161,25 @@ fn main() {
 
             let exe = std::env::current_exe()
                 .unwrap_or_else(|_| std::path::PathBuf::from("visor"));
+            let mut serve_args = vec![
+                "serve-internal".to_string(),
+                "--path".to_string(),
+                abs_path_str.clone(),
+                "--port".to_string(),
+                port.to_string(),
+            ];
+            if ts {
+                serve_args.push("--ts".to_string());
+                // Resolve transpiler path NOW (CLI has user's PATH) so the
+                // daemon subprocess can find it even without the full PATH.
+                if let Some(t) = resolve_transpiler_path() {
+                    serve_args.push("--transpiler".to_string());
+                    serve_args.push(t);
+                }
+            }
             let resp = client::send_request(Request::Start {
                 cmd: exe.to_string_lossy().to_string(),
-                args: vec![
-                    "serve-internal".to_string(),
-                    "--path".to_string(),
-                    abs_path_str.clone(),
-                    "--port".to_string(),
-                    port.to_string(),
-                ],
+                args: serve_args,
                 name: name.clone(),
                 agent: None,
                 group: Some("fileserver".to_string()),
@@ -189,8 +199,8 @@ fn main() {
             }
         }
 
-        Some(Commands::ServeInternal { path, port }) => {
-            fileserver::run(&path, port)
+        Some(Commands::ServeInternal { path, port, ts, transpiler }) => {
+            fileserver::run(&path, port, ts, transpiler.as_deref())
         }
 
         Some(Commands::App(app_cmd)) => handle_app_command(app_cmd),
@@ -579,6 +589,25 @@ fn guess_category(label: &str) -> String {
     else if l.contains("start") || l.contains("run") { "run".to_string() }
     else if l.contains("install") || l.contains("tidy") { "setup".to_string() }
     else { "custom".to_string() }
+}
+
+/// Resolve a transpiler's full path using the current user's PATH.
+fn resolve_transpiler_path() -> Option<String> {
+    for cmd in &["esbuild", "swc", "bun", "tsc"] {
+        if let Ok(output) = std::process::Command::new("where")
+            .arg(cmd)
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout);
+                let first_line = path.lines().next().unwrap_or("").trim();
+                if !first_line.is_empty() {
+                    return Some(first_line.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Strip the \\?\ prefix that Windows canonicalize adds.
