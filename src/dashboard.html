@@ -133,6 +133,31 @@
     color: var(--text-dim); cursor: pointer; font-size: 1em; padding: 2px 6px;
   }
   .app-card .remove-btn:hover { color: var(--red); }
+  /* Wiki */
+  .wiki { max-width: 900px; }
+  .wiki h2 { color: var(--accent); font-size: 1.2em; margin: 24px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .wiki h2:first-child { margin-top: 0; }
+  .wiki h3 { color: var(--text); font-size: 1em; margin: 16px 0 6px 0; }
+  .wiki p, .wiki li { color: var(--text-dim); font-size: 0.9em; line-height: 1.6; }
+  .wiki ul { padding-left: 20px; margin: 4px 0 12px 0; }
+  .wiki code { background: var(--bg); color: var(--green); padding: 2px 6px; border-radius: 3px; font-size: 0.88em; }
+  .wiki pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 8px 0 16px 0; font-size: 0.85em; line-height: 1.5; }
+  .wiki pre code { background: none; padding: 0; }
+  .wiki .path-var { color: var(--yellow); font-weight: 600; }
+  .wiki .flag { color: var(--purple); }
+  .wiki .wiki-path-bar {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 20px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px;
+  }
+  .wiki .wiki-path-bar label { font-size: 0.8em; color: var(--text-dim); text-transform: uppercase; }
+  .wiki .wiki-path-bar input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); padding: 6px 10px; font-size: 0.9em; font-family: 'Cascadia Code', 'Consolas', monospace;
+  }
+  .wiki .wiki-path-bar input:focus { border-color: var(--accent); outline: none; }
+  .wiki .note { background: rgba(88,166,255,0.08); border-left: 3px solid var(--accent); padding: 8px 14px; margin: 8px 0 16px 0; border-radius: 0 4px 4px 0; }
+  .wiki .note p { margin: 0; }
+  .wiki .warn { background: rgba(210,153,34,0.08); border-left: 3px solid var(--yellow); }
   /* Serve bar */
   .serve-bar {
     display: flex; align-items: center; gap: 10px;
@@ -195,6 +220,7 @@
     <div class="tab active" data-tab="running" onclick="switchTab('running')">Running</div>
     <div class="tab" data-tab="history" onclick="switchTab('history')">History</div>
     <div class="tab" data-tab="projects" onclick="switchTab('projects')">Scan</div>
+    <div class="tab" data-tab="wiki" onclick="switchTab('wiki')">Wiki</div>
   </div>
   <div class="refresh-info">Auto-refresh every 3s</div>
 </div>
@@ -247,6 +273,10 @@
   <div id="projects-list"></div>
 </div>
 
+<div id="panel-wiki" class="panel">
+  <div class="wiki" id="wiki-content"></div>
+</div>
+
 <!-- Terminal overlay -->
 <div class="terminal-overlay" id="terminal-overlay">
   <div class="terminal-header">
@@ -278,6 +308,7 @@ function switchTab(tab) {
   document.querySelector(`.tab[data-tab="${tab}"]`).classList.add('active');
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('visible'));
   document.getElementById('panel-' + tab).classList.add('visible');
+  if (tab === 'wiki') renderWiki();
 }
 
 function formatUptime(startedAt) {
@@ -491,6 +522,153 @@ function esc(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+
+// ---- Wiki ----
+let wikiPath = 'C:\\projects\\myapp';
+
+function renderWiki() {
+  const P = () => esc(wikiPath);
+  const name = () => esc(wikiPath.split('\\').pop() || 'myapp');
+
+  const cmd = (text) => {
+    const escaped = esc(text);
+    return `<div style="display:flex;align-items:center;gap:6px;margin:3px 0;">
+      <code style="flex:1;">${escaped}</code>
+      <button onclick="copyCmd(this)" data-cmd="${escaped.replace(/"/g,'&quot;')}" style="background:none;border:1px solid var(--border);color:var(--text-dim);cursor:pointer;padding:2px 8px;border-radius:4px;font-size:0.78em;" title="Copy">&#128203;</button>
+    </div>`;
+  };
+
+  document.getElementById('wiki-content').innerHTML = `
+    <div class="wiki-path-bar">
+      <label>Your path</label>
+      <input type="text" id="wiki-path-input" value="${P()}" onchange="wikiPath=this.value;renderWiki()" placeholder="C:\\projects\\myapp">
+    </div>
+
+    <h2>Quick Start</h2>
+    <p>Visor is a process supervisor. Start apps, track them, stop them later — even across terminal sessions.</p>
+    ${cmd(`visor start --name ${name()} python server.py`)}
+    ${cmd(`visor list`)}
+    ${cmd(`visor stop ${name()}`)}
+
+    <h2>Starting Processes</h2>
+    <h3>Transparent mode (default)</h3>
+    <p>The process inherits your terminal. stdin/stdout/stderr work normally. Visor uses a real pseudo-terminal (ConPTY) so even libraries like rustyline see a genuine TTY.</p>
+    ${cmd(`visor start --name ${name()} python server.py`)}
+    ${cmd(`visor start --name ${name()} --cwd ${P()} npm run dev`)}
+    ${cmd(`visor start --name ${name()} ${P()}\\target\\debug\\${name()}.exe`)}
+
+    <h3>Capture mode</h3>
+    <p>Output saved to a log file. No stdin. Use for background workers and services.</p>
+    ${cmd(`visor start --name ${name()} --mode capture python server.py`)}
+    ${cmd(`visor start --name ${name()} --mode capture --cwd ${P()} node worker.js`)}
+    <div class="note warn"><p>Do NOT use <code>--mode capture</code> for interactive apps — they'll exit immediately (no stdin).</p></div>
+
+    <h3>With metadata</h3>
+    ${cmd(`visor start --name ${name()} --agent claude --group project-x npm run dev`)}
+
+    <h3>Kill code protection</h3>
+    <p>Protect critical processes from accidental termination with a 4-digit code.</p>
+    ${cmd(`visor start --name ${name()} --kill-code 1234 --mode capture python server.py`)}
+    ${cmd(`visor stop ${name()} --code 1234`)}
+    ${cmd(`visor stop ${name()} --code 4334`)}
+    <div class="note"><p>Master code <code>4334</code> overrides any kill code.</p></div>
+
+    <h3>Auto-restart</h3>
+    <p>Automatically restart when the process exits.</p>
+    ${cmd(`visor start --name ${name()} --restart --mode capture python server.py`)}
+
+    <h3>Watch executable (hot-reload)</h3>
+    <p>Restart when the binary file is overwritten (e.g. after recompilation).</p>
+    ${cmd(`visor start --name ${name()} --watch-exe ${P()}\\target\\debug\\${name()}.exe --mode capture ${P()}\\target\\debug\\${name()}.exe`)}
+
+    <h2>Listing &amp; Filtering</h2>
+    ${cmd(`visor list`)}
+    ${cmd(`visor list --json`)}
+    ${cmd(`visor list --agent claude`)}
+    ${cmd(`visor list --group project-x`)}
+
+    <h2>Stopping Processes</h2>
+    ${cmd(`visor stop ${name()}`)}
+    ${cmd(`visor stop --id <uuid>`)}
+    ${cmd(`visor stop --pid 12345`)}
+    ${cmd(`visor stop --agent claude`)}
+    ${cmd(`visor stop --group project-x`)}
+    ${cmd(`visor stop-all`)}
+    ${cmd(`visor stop-all --code 4334`)}
+
+    <h2>Viewing Output (capture mode)</h2>
+    ${cmd(`visor attach ${name()}`)}
+    ${cmd(`visor attach ${name()} --history`)}
+    ${cmd(`visor logs ${name()}`)}
+
+    <h2>Static File Server</h2>
+    <p>Serve files from a directory. Each invocation gets a random free port unless <code>--port</code> is specified.</p>
+    ${cmd(`visor serve --path ${P()}`)}
+    ${cmd(`visor serve --path ${P()} --port 3000 --name ${name()}-site`)}
+    ${cmd(`visor serve --path ${P()} --ts`)}
+    <div class="note"><p><code>--ts</code> transpiles TypeScript on the fly using esbuild/swc/bun/tsc. Files are cached until modified.</p></div>
+
+    <h2>Saved Apps</h2>
+    <p>Save frequently-used projects with auto-detected commands.</p>
+    ${cmd(`visor app add --path ${P()}`)}
+    ${cmd(`visor app add --name ${name()} --path ${P()} --tag backend --desc "REST API"`)}
+    ${cmd(`visor app list`)}
+    ${cmd(`visor app get ${name()}`)}
+    ${cmd(`visor app run ${name()} dev`)}
+    ${cmd(`visor app run ${name()} build`)}
+    ${cmd(`visor app run ${name()} test`)}
+    ${cmd(`visor app remove ${name()}`)}
+
+    <h2>Bulk Scan</h2>
+    <p>Scan a directory tree for projects and add them all as saved apps. First-level subdirectory becomes a tag.</p>
+    ${cmd(`visor app scan --path ${P()}`)}
+    ${cmd(`visor app scan --path ${P()} --depth 4`)}
+
+    <h2>Executable Scan</h2>
+    <p>Find all .exe files in a directory and add them as apps (with icon extraction).</p>
+    ${cmd(`visor app scan-exes --path C:\\apps`)}
+    ${cmd(`visor app scan-exes --path "C:\\Program Files" --depth 3`)}
+
+    <h2>GUI Dashboard</h2>
+    ${cmd(`visor gui`)}
+    ${cmd(`visor gui --port 4173`)}
+    <p>Or just run <code>visor</code> with no arguments at an interactive terminal — the GUI opens automatically.</p>
+
+    <h2>Daemon</h2>
+    <p>The daemon starts automatically on first use. These commands are rarely needed.</p>
+    ${cmd(`visor status`)}
+    ${cmd(`visor daemon`)}
+    ${cmd(`visor cleanup`)}
+
+    <h2>Full Reference</h2>
+    ${cmd(`visor help-all`)}
+    <p>Shows every command, every flag, every mode — all in one page.</p>
+
+    <h2>I/O Modes</h2>
+    <table style="width:100%;border-collapse:collapse;margin:8px 0;">
+      <tr><th style="text-align:left;padding:6px;border-bottom:1px solid var(--border);color:var(--text-dim);">Mode</th><th style="text-align:left;padding:6px;border-bottom:1px solid var(--border);color:var(--text-dim);">Behavior</th></tr>
+      <tr><td style="padding:6px;border-bottom:1px solid var(--border);"><code>transparent</code> (default)</td><td style="padding:6px;border-bottom:1px solid var(--border);color:var(--text-dim);">Real pseudo-terminal (ConPTY). stdin/stdout/stderr work exactly like running the command directly.</td></tr>
+      <tr><td style="padding:6px;"><code>capture</code></td><td style="padding:6px;color:var(--text-dim);">No stdin. Output saved to log file. Use <code>visor attach</code> to view. For headless workers only.</td></tr>
+    </table>
+
+    <h2>Safety</h2>
+    <p>Visor uses Windows Job Objects. Stop operations only kill the target process and its descendants — never parent shells, VS Code, or unrelated ancestors.</p>
+  `;
+}
+
+function copyCmd(btn) {
+  const text = btn.getAttribute('data-cmd')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#128203;/g, '');
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.innerHTML;
+    btn.innerHTML = '&#10003;';
+    btn.style.color = 'var(--green)';
+    setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 1200);
+  });
+}
+
+// Render wiki on tab switch
+const origSwitch = switchTab;
 
 // ---- My Apps ----
 let savedApps = [];
