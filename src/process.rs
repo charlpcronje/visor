@@ -158,6 +158,50 @@ pub fn terminate_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Find all descendant PIDs of the given root (children, grandchildren, etc).
+/// Used as a fallback for job-based termination when the job handle is gone
+/// (e.g. after a daemon restart).
+pub fn find_descendants(root: u32) -> Vec<u32> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
+        PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+
+    let mut pairs: Vec<(u32, u32)> = Vec::new(); // (pid, ppid)
+    unsafe {
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                pairs.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+
+    // BFS down the tree from `root`
+    let mut result = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for (pid, ppid) in &pairs {
+            if *ppid == parent && *pid != parent && !result.contains(pid) {
+                result.push(*pid);
+                frontier.push(*pid);
+            }
+        }
+    }
+    result
+}
+
 /// Get memory usage (working set) for a process.
 pub fn get_process_memory(pid: u32) -> Option<u64> {
     use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};

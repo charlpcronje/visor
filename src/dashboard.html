@@ -242,11 +242,11 @@
     <thead>
       <tr>
         <th>Name</th><th>PID</th><th>Mode</th><th>Agent</th><th>Group</th>
-        <th>Started</th><th>Uptime</th><th>Command</th><th>Actions</th>
+        <th>Started</th><th>Uptime</th><th>Command</th><th>URL</th><th>Actions</th>
       </tr>
     </thead>
     <tbody id="running-body">
-      <tr><td colspan="9" class="empty-state"><p>No apps running</p></td></tr>
+      <tr><td colspan="10" class="empty-state"><p>No apps running</p></td></tr>
     </tbody>
   </table>
 </div>
@@ -362,11 +362,34 @@ async function fetchList() {
   } catch {}
 }
 
+function detectUrl(app, args) {
+  // Try to find a --port flag or a port-like pattern in the args
+  let port = null;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--port' && i + 1 < args.length) {
+      const p = parseInt(args[i + 1]);
+      if (!isNaN(p) && p > 0 && p < 65536) { port = p; break; }
+    }
+    // Match --port=3000, --port:3000
+    const m = /^--port[=:](\d+)$/.exec(args[i]);
+    if (m) { port = parseInt(m[1]); break; }
+    // Match -p 3000
+    if (args[i] === '-p' && i + 1 < args.length) {
+      const p = parseInt(args[i + 1]);
+      if (!isNaN(p) && p > 0 && p < 65536) { port = p; break; }
+    }
+    // Match --web:8080 (common convention)
+    const m2 = /^--\w+:(\d+)$/.exec(args[i]);
+    if (m2) { port = parseInt(m2[1]); break; }
+  }
+  return port ? `http://localhost:${port}` : null;
+}
+
 function renderRunning(apps) {
   const running = apps.filter(a => a.status === 'running');
   const tbody = document.getElementById('running-body');
   if (running.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-state"><p>No apps running</p></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state"><p>No apps running</p></td></tr>';
     return;
   }
   tbody.innerHTML = running.map(app => {
@@ -378,6 +401,13 @@ function renderRunning(apps) {
     const termBtn = hasLog
       ? `<button class="btn terminal-btn" onclick="openTerminal('${esc(app.id)}','${esc(app.name)}','${esc(cmd)}')">Terminal</button>`
       : '';
+
+    const url = detectUrl(app, args);
+    const urlCell = url
+      ? `<a href="${esc(url)}" target="_blank" style="color:var(--accent);text-decoration:none;">${esc(url)}</a>
+         <button onclick="copyUrl(this,'${esc(url)}')" style="background:none;border:1px solid var(--border);color:var(--text-dim);cursor:pointer;padding:1px 6px;border-radius:3px;font-size:0.75em;margin-left:4px;" title="Copy URL">&#128203;</button>`
+      : '<span style="color:var(--text-dim);">-</span>';
+
     return `<tr>
       <td><strong>${esc(app.name)}</strong></td>
       <td>${app.pid}</td>
@@ -387,12 +417,22 @@ function renderRunning(apps) {
       <td>${formatTime(app.started_at)}</td>
       <td class="uptime">${formatUptime(app.started_at)}</td>
       <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(cmd)}">${esc(cmd)}</td>
+      <td style="white-space:nowrap;">${urlCell}</td>
       <td style="white-space:nowrap;">
         ${termBtn}
         <button class="btn danger" onclick="stopApp('${esc(app.name)}')">Stop</button>
       </td>
     </tr>`;
   }).join('');
+}
+
+function copyUrl(btn, url) {
+  navigator.clipboard.writeText(url).then(() => {
+    const orig = btn.innerHTML;
+    btn.innerHTML = '&#10003;';
+    btn.style.color = 'var(--green)';
+    setTimeout(() => { btn.innerHTML = orig; btn.style.color = ''; }, 1200);
+  });
 }
 
 function renderHistory(apps) {

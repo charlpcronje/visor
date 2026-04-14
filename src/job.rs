@@ -4,9 +4,7 @@ use std::sync::Mutex;
 use windows::core::PCSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectA, SetInformationJobObject,
-    TerminateJobObject, JobObjectExtendedLimitInformation,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectA, TerminateJobObject,
 };
 
 /// Manages Windows Job Objects for safe process containment.
@@ -26,23 +24,15 @@ impl JobManager {
     }
 
     /// Create a named Job Object and store it.
+    /// We do NOT set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE — tracked processes
+    /// must survive daemon restarts. When the daemon exits, its handles close
+    /// and the job is destroyed, but the processes keep running. On restart,
+    /// the daemon picks them up again by PID from SQLite.
     pub fn create_job(&self, job_name: &str) -> Result<HANDLE> {
         unsafe {
             let name_cstr = format!("Local\\visor-job-{job_name}\0");
             let handle = CreateJobObjectA(None, PCSTR(name_cstr.as_ptr()))
                 .context("CreateJobObjectA failed")?;
-
-            // Configure: kill all processes when job handle is closed
-            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-            SetInformationJobObject(
-                handle,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const std::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-            .context("SetInformationJobObject failed")?;
 
             self.jobs.lock().unwrap().insert(job_name.to_string(), handle);
             Ok(handle)

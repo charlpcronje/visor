@@ -54,6 +54,41 @@ fn main() {
             resp.map(|r| client::print_response(&r, false))
         }
 
+        Some(Commands::Restart) => {
+            if !client::is_daemon_running() {
+                println!("Daemon is not running. Nothing to restart.");
+                match client::send_request(Request::Status) {
+                    Ok(_) => { println!("Daemon started."); Ok(()) }
+                    Err(e) => Err(e),
+                }
+            } else {
+                println!("Shutting down daemon (tracked processes will keep running)...");
+                // Send shutdown — response may not come back because daemon exits
+                let _ = client::send_request(Request::Shutdown);
+
+                // Wait for the daemon to actually exit (mutex released)
+                for i in 0..40 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    if !client::is_daemon_running() {
+                        break;
+                    }
+                    if i == 39 {
+                        eprintln!("Warning: daemon took a while to exit");
+                    }
+                }
+
+                println!("Starting new daemon...");
+                // Kick the new daemon by sending any request (auto-starts)
+                match client::send_request(Request::Status) {
+                    Ok(r) => {
+                        client::print_response(&r, false);
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }
+
         Some(Commands::Daemon) => {
             if client::is_daemon_running() {
                 println!("Visor daemon is already running.");

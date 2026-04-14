@@ -122,6 +122,12 @@ pub enum Commands {
     /// Start the background daemon (auto-starts on any command)
     Daemon,
 
+    /// Restart the daemon without killing tracked processes (hot-swap)
+    #[command(
+        after_help = "Tracked processes survive — the daemon shuts down cleanly and a new\none starts up, picking up existing processes from the registry.\n\nUseful after rebuilding visor.exe without disrupting running apps."
+    )]
+    Restart,
+
     /// Start a process (transparent by default - inherits your terminal)
     #[command(
         after_help = "The default mode is transparent: the app gets your terminal's stdin/stdout/stderr.\nDo NOT use --mode capture unless you want a backgrounded process with no stdin.\n\nExamples:\n  visor start --name api python server.py\n  visor start --name dev npm run dev\n  visor start --name app C:\\path\\to\\app.exe --flag:value\n  visor start --name bg --mode capture node worker.js   # backgrounded, no stdin"

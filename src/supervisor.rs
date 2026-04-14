@@ -645,11 +645,26 @@ impl Supervisor {
     }
 
     fn stop_app(&self, app: &AppRecord) {
-        if let Some(ref jn) = app.job_name {
-            let _ = self.jobs.terminate_job(jn);
+        // Strategy:
+        //  1. If the daemon still owns the job handle, TerminateJobObject kills
+        //     the tracked process AND all its descendants in one atomic op.
+        //  2. Otherwise (e.g. this daemon was restarted and the old job is gone),
+        //     fall back to walking the PID tree ourselves and terminating each.
+        let terminated_via_job = if let Some(ref jn) = app.job_name {
+            self.jobs.terminate_job(jn).is_ok()
         } else {
+            false
+        };
+
+        if !terminated_via_job {
+            // Walk descendants first (so parent can't respawn them)
+            let descendants = process::find_descendants(app.pid);
+            for child_pid in descendants {
+                let _ = process::terminate_process(child_pid);
+            }
             let _ = process::terminate_process(app.pid);
         }
+
         let _ = self.registry.update_status(&app.id, &AppStatus::Stopped);
     }
 }
